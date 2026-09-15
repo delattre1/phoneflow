@@ -1,0 +1,10 @@
+#!/bin/sh
+PATH=/command:/usr/local/bin:/usr/bin:/bin
+export PATH
+export PYTHONPATH=/opt/phoneflow
+export PHONEFLOW_HOME=/var/lib/hermes/phoneflow
+export PHONEFLOW_WEB=/opt/phoneflow/web
+export PHONEFLOW_PORT=8787
+export PHONEFLOW_DRIVER="${PHONEFLOW_DRIVER:-latch}"
+exec /command/s6-setuidgid hermes \
+  /opt/hermes/.venv/bin/python3 -m pf_api

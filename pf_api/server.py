@@ -13,7 +13,7 @@ from pf_api.interpreter import Interpreter
 from pf_api.schema import SchemaError, validate_workflow
 from pf_api.store import (
     delete_workflow,
-    ensure_dirs,
+    ensure_seeded,
     frame_path,
     load_events,
     load_run,
@@ -299,7 +299,7 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
 
 def make_server(home, driver, latch_ok, host="127.0.0.1", port=0):
     home = Path(home)
-    ensure_dirs(home)
+    ensure_seeded(home)
 
     class BoundServer(ThreadingHTTPServer):
         daemon_threads = True

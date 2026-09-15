@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 from pathlib import Path
 
 
@@ -20,6 +21,20 @@ def new_run_id() -> str:
 def ensure_dirs(home: Path) -> None:
     workflows_dir(home).mkdir(parents=True, exist_ok=True)
     runs_dir(home).mkdir(parents=True, exist_ok=True)
+
+
+def ensure_seeded(home: Path) -> None:
+    ensure_dirs(home)
+    dest = workflows_dir(home)
+    if any(dest.glob("*.json")):
+        return
+    src = Path("/opt/phoneflow/workflows")
+    if not src.is_dir():
+        src = Path(__file__).resolve().parents[1] / "workflows"
+    if not src.is_dir():
+        return
+    for p in src.glob("*.json"):
+        shutil.copy2(p, dest / p.name)
 
 
 def save_workflow(home: Path, doc: dict) -> None:

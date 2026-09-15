@@ -1,0 +1,15 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "0.0.0.0:8787:8787"
+    environment:
+      AGENT_ID: phoneflow
+      PHONEFLOW_DRIVER: latch
+    volumes:
+      - ./plow-credentials:/var/lib/plow/credentials.host:ro
+      - agent-home:/var/lib/hermes
+    stop_grace_period: 35s
+
+volumes:
+  agent-home:
