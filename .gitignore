@@ -1,0 +1,9 @@
+plow-credentials
+__pycache__/
+.pytest_cache/
+.venv/
+web/node_modules/
+web/dist/
+*.pyc
+.DS_Store
+.superpowers/
