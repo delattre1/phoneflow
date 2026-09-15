@@ -33,8 +33,9 @@ Prerequisites: Docker + docker compose plugin, and
 
 ```sh
 # on suedpc.local
+git clone https://github.com/plow-pbc/plow-agents ~/plow-agents
+export PATH="$HOME/plow-agents/bin:$PATH"
 git clone <repo> ~/phoneflow-hermes-agent
-export PATH="$HOME/plow-agents/bin:$PATH"   # from github.com/plow-pbc/plow-agents
 plow-agents login
 plow-agents lines
 plow-agents mint ln_xxx
@@ -75,11 +76,9 @@ verified" — as shipped, it just Spotlight-searches the literal `CHANGE_ME`
 and parks on a confirm.
 
 ## Register the agent in the Agent Index
-
 ```sh
-cd ~/phoneflow-hermes-agent
-set -a; . ./plow-credentials; set +a
-python3 agent_index_client.py --register --agent phoneflow \
+docker compose exec agent /opt/hermes/.venv/bin/python3 /opt/plow/agent-index-client.py \
+  --register --agent phoneflow \
   --name "PhoneFlow" \
   --blurb "Draw iPhone actions; Hermes runs them through Latch + iPhone Mirroring." \
   --runtime "Hermes"
