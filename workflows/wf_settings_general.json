@@ -1,0 +1,16 @@
+{
+  "id": "wf_settings_general",
+  "name": "Open Settings → General",
+  "version": 1,
+  "nodes": [
+    {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+    {"id": "n2", "type": "phone.openApp", "position": {"x": 0, "y": 1}, "params": {"app": "Settings"}},
+    {"id": "n3", "type": "phone.tap", "position": {"x": 0, "y": 2}, "params": {"label": "General"}},
+    {"id": "n4", "type": "phone.screenshot", "position": {"x": 0, "y": 3}, "params": {}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "n1", "target": "n2"},
+    {"id": "e2", "source": "n2", "target": "n3"},
+    {"id": "e3", "source": "n3", "target": "n4"}
+  ]
+}

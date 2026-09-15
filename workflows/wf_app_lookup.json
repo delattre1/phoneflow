@@ -1,0 +1,16 @@
+{
+  "id": "wf_app_lookup",
+  "name": "App lookup (fill me)",
+  "version": 1,
+  "nodes": [
+    {"id": "n1", "type": "trigger.manual", "position": {"x": 80, "y": 40}, "params": {}},
+    {"id": "n2", "type": "phone.openApp", "position": {"x": 80, "y": 140}, "params": {"app": "CHANGE_ME"}},
+    {"id": "n3", "type": "flow.confirm", "position": {"x": 80, "y": 240}, "params": {"prompt": "Continue on the iPhone?"}},
+    {"id": "n4", "type": "phone.screenshot", "position": {"x": 80, "y": 340}, "params": {}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "n1", "target": "n2"},
+    {"id": "e2", "source": "n2", "target": "n3"},
+    {"id": "e3", "source": "n3", "target": "n4"}
+  ]
+}
