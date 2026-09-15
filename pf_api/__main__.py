@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from pf_api.server import make_server
-from pf_api.driver import FakeDriver  # replaced by LatchDriver in Task 5 via env PHONEFLOW_DRIVER=latch|fake
+from pf_api.driver import FakeDriver  # driver selected via PHONEFLOW_DRIVER=latch|fake
 
 def main():
     home = Path(os.environ.get("PHONEFLOW_HOME", "/var/lib/hermes/phoneflow"))
