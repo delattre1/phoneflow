@@ -197,3 +197,24 @@ def test_tap_label_fails_after_three_attempts():
     assert run["status"] == "failed"
     assert run["error"]["code"] == "element_not_found"
     assert len([c for c in drv.calls if c[0] == "tap_label"]) == 3
+
+def test_swipe_node_reaches_driver():
+    doc = {
+        "id": "wf_swipe",
+        "name": "swipe",
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+            {"id": "n2", "type": "phone.swipe", "position": {"x": 0, "y": 1},
+             "params": {"from": {"x": 0.5, "y": 0.8}, "to": {"x": 0.5, "y": 0.2}, "durationMs": 300}},
+            {"id": "n3", "type": "flow.stop", "position": {"x": 0, "y": 2}, "params": {}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2"},
+            {"id": "e2", "source": "n2", "target": "n3"},
+        ],
+    }
+    drv = FakeDriver()
+    run = Interpreter(drv).run_all(doc)
+    assert run["status"] == "succeeded"
+    assert ("swipe", {"x": 0.5, "y": 0.8}, {"x": 0.5, "y": 0.2}, 300) in drv.calls

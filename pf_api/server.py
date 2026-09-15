@@ -315,6 +315,9 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             self._send(400, {"code": "validation", "path": "$", "message": "invalid json"})
             return
         decision = body.get("decision") if isinstance(body, dict) else None
+        if decision not in ("approve", "deny"):
+            self._send(400, {"code": "validation", "path": "decision", "message": "approve or deny"})
+            return
         run = itp.resume_confirm(decision)
         self._persist(itp)
         while run["status"] == "running":

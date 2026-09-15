@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
+import threading
 from pathlib import Path
 
 
@@ -81,7 +83,9 @@ def save_run(
 ) -> None:
     d = run_dir(home, run["id"])
     d.mkdir(parents=True, exist_ok=True)
-    (d / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    tmp = d / f"run.json.{os.getpid()}.{threading.get_ident()}.tmp"
+    tmp.write_text(json.dumps(run), encoding="utf-8")
+    os.replace(tmp, d / "run.json")
     if events is not None:
         with (d / "events.jsonl").open("w", encoding="utf-8") as f:
             for ev in events:

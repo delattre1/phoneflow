@@ -142,13 +142,21 @@ class LatchDriver:
             headers["mcp-session-id"] = self._session_id
         return headers
 
+    @staticmethod
+    def _header_get(headers: dict, name: str) -> str | None:
+        lname = name.lower()
+        for k, v in headers.items():
+            if k.lower() == lname:
+                return v
+        return None
+
     def _post(self, payload: dict) -> dict | None:
         body = json.dumps(payload)
         status, resp_headers, resp_body = self._transport.post(self._url(), self._headers(), body)
-        sid = resp_headers.get("mcp-session-id")
+        sid = self._header_get(resp_headers, "mcp-session-id")
         if sid:
             self._session_id = sid
-        ctype = (resp_headers.get("Content-Type") or "").lower()
+        ctype = (self._header_get(resp_headers, "Content-Type") or "").lower()
         if "text/event-stream" in ctype:
             return self._from_sse(resp_body, payload.get("id"))
         if not resp_body.strip():
@@ -160,7 +168,6 @@ class LatchDriver:
         if isinstance(msg, dict) and "result" not in msg and "error" not in msg and "method" in msg:
             return None  # server-push notification; not our answer
         return self._checked(msg)
-
     def _from_sse(self, stream: str, want_id) -> dict | None:
         data_lines: list[str] = []
         for line in stream.splitlines():

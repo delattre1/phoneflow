@@ -141,6 +141,9 @@ class Interpreter:
             else:
                 self.driver.tap(params["x"], params["y"])
             return self._after_phone()
+        if ntype == "phone.swipe":
+            self.driver.swipe(params["from"], params["to"], int(params.get("durationMs") or 0))
+            return self._after_phone()
         if ntype == "phone.type":
             self.driver.type_text(params["text"])
             return self._after_phone()
