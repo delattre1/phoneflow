@@ -4,16 +4,16 @@ Draw iPhone chores on a canvas; Hermes runs them through Plow Latch and
 iPhone Mirroring on a nearby Mac.
 
 - **License:** MIT (see [LICENSE](LICENSE)).
-- **Network:** LAN only. The API binds `0.0.0.0:8787` so any device on the
-  home network can open the canvas. **Never publish port 8787 to the
-  internet.**
+- **Network:** LAN only. The API listens on **host port `8788`** (container
+  stays 8787) so any device on the home network can open the canvas.
+  **Never publish port 8788 to the internet.**
 
 ## Topology
 
 ```
 ┌──────────────────┐  canvas / API   ┌────────────────────┐
 │  suedpc.local    │◄───────────────►│  your Mac          │
-│  docker compose  │  :8787 (LAN)    │  Latch             │
+│  docker compose  │  :8788 (LAN)    │  Latch             │
 │  PhoneFlow agent │                 │  iPhone Mirroring  │
 └──────────────────┘                 └────────────────────┘
         │                                     │
@@ -21,7 +21,7 @@ iPhone Mirroring on a nearby Mac.
 ```
 
 - **suedpc.local** hosts the PhoneFlow agent in Docker and serves the canvas
-  at `http://suedpc.local:8787`.
+  at `http://suedpc.local:8788`.
 - **Your Mac** runs Plow Latch and iPhone Mirroring; the agent's phone
   actions (tap, type, screenshot, app open) execute there through Latch's
   Accessibility + Screen Recording permissions.
@@ -52,8 +52,7 @@ build on a bad fetch.
 Verify:
 
 ```sh
-curl -sf http://suedpc.local:8787/api/health
-# → {"ok": true, "latch": "up"}   latch: "down" means Latch is not open on the Mac
+curl -sf http://suedpc.local:8788/api/health
 ```
 
 ## On the Mac
@@ -63,7 +62,7 @@ curl -sf http://suedpc.local:8787/api/health
    visible.
 3. Grant macOS **Accessibility** and **Screen Recording** to Latch (and
    `cliclick` if you use it).
-4. Open `http://suedpc.local:8787` in a browser.
+4. Open `http://suedpc.local:8788` in a browser.
 
 If `/api/health` reports `latch: "down"`, stop and open Latch first.
 
