@@ -1,5 +1,5 @@
 # tests/test_interpreter.py
-from pf_api.driver import FakeDriver
+from pf_api.driver import DriverError, FakeDriver
 from pf_api.interpreter import Interpreter
 
 SETTINGS = {
@@ -151,3 +151,49 @@ def test_unexpected_lock_parks_vault():
     }
     run = Interpreter(FakeDriver(ocr_text="Enter Password")).start(doc)
     assert run["status"] == "awaiting_vault"
+
+class FlakyLabelDriver(FakeDriver):
+    def __init__(self, fails: int):
+        super().__init__(ocr_text="General")
+        self.fails = fails
+
+    def tap_label(self, label: str) -> None:
+        self.calls.append(("tap_label", label))
+        if self.fails > 0:
+            self.fails -= 1
+            raise DriverError("element_not_found", label)
+
+
+def test_tap_label_retries_then_succeeds():
+    doc = {
+        "id": "wf_retry",
+        "name": "retry",
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+            {"id": "n2", "type": "phone.tap", "position": {"x": 0, "y": 1}, "params": {"label": "General"}},
+        ],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+    drv = FlakyLabelDriver(fails=2)
+    run = Interpreter(drv, retry_wait=0.0).run_all(doc)
+    assert run["status"] == "succeeded"
+    assert len([c for c in drv.calls if c[0] == "tap_label"]) == 3
+
+
+def test_tap_label_fails_after_three_attempts():
+    doc = {
+        "id": "wf_retry",
+        "name": "retry",
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+            {"id": "n2", "type": "phone.tap", "position": {"x": 0, "y": 1}, "params": {"label": "General"}},
+        ],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+    drv = FlakyLabelDriver(fails=3)
+    run = Interpreter(drv, retry_wait=0.0).run_all(doc)
+    assert run["status"] == "failed"
+    assert run["error"]["code"] == "element_not_found"
+    assert len([c for c in drv.calls if c[0] == "tap_label"]) == 3

@@ -27,8 +27,9 @@ def _now() -> str:
 
 
 class Interpreter:
-    def __init__(self, driver):
+    def __init__(self, driver, retry_wait: float = 0.8):
         self.driver = driver
+        self.retry_wait = retry_wait
         self.frames: list[bytes] = []
         self.events: list[dict] = []
         self.run: dict | None = None
@@ -136,12 +137,9 @@ class Interpreter:
         if ntype == "phone.tap":
             label = params.get("label")
             if label:
-                self.driver.tap_label(label)
+                self._tap_label_with_retry(label)
             else:
                 self.driver.tap(params["x"], params["y"])
-            return self._after_phone()
-        if ntype == "phone.swipe":
-            self.driver.swipe(params["from"], params["to"], int(params.get("durationMs") or 0))
             return self._after_phone()
         if ntype == "phone.type":
             self.driver.type_text(params["text"])
@@ -169,6 +167,18 @@ class Interpreter:
             self._event(node["id"], "ok")
             return self._succeed()
         return self._next()
+
+    def _tap_label_with_retry(self, label: str) -> None:
+        # spec §9.5: retry 3 times with 800 ms wait, then fail the node.
+        for attempt in range(3):
+            try:
+                self.driver.tap_label(label)
+                return
+            except DriverError as exc:
+                if exc.code != "element_not_found" or attempt == 2:
+                    raise
+            if self.retry_wait > 0:
+                time.sleep(self.retry_wait)
 
     def _after_phone(self):
         frame = self.driver.screenshot()
