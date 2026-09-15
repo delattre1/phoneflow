@@ -93,3 +93,50 @@ def test_if_requires_true_false_handles():
     }
     with pytest.raises(SchemaError):
         validate_workflow(doc)
+
+def test_rejects_two_outgoing_edges_on_non_if_node():
+    doc = _wf()
+    doc["edges"].append({"id": "e2", "source": "n1", "target": "n2"})
+    with pytest.raises(SchemaError) as e:
+        validate_workflow(doc)
+    assert "edges" in e.value.path
+
+
+def test_rejects_second_outgoing_edge_on_trigger():
+    doc = _wf()
+    doc["nodes"].append({"id": "n3", "type": "flow.stop", "position": {"x": 1, "y": 0}, "params": {}})
+    doc["edges"].append({"id": "e2", "source": "n1", "target": "n3"})
+    with pytest.raises(SchemaError) as e:
+        validate_workflow(doc)
+    assert "edges" in e.value.path and "n1" in str(e.value)
+
+
+def _if_doc(handles):
+    nodes = [
+        {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+        {"id": "n2", "type": "flow.if", "position": {"x": 0, "y": 1}, "params": {"match": "General"}},
+    ]
+    if "true" in handles:
+        nodes.append({"id": "n3", "type": "flow.stop", "position": {"x": 0, "y": 2}, "params": {}})
+    if "false" in handles:
+        nodes.append({"id": "n4", "type": "flow.stop", "position": {"x": 0, "y": 3}, "params": {}})
+    edges = [{"id": "e1", "source": "n1", "target": "n2"}]
+    targets = {"true": "n3", "false": "n4"}
+    for i, h in enumerate(handles):
+        edges.append({"id": f"e{i + 2}", "source": "n2", "target": targets[h], "sourceHandle": h})
+    return {"id": "wf_if", "name": "if", "version": 1, "nodes": nodes, "edges": edges}
+
+
+def test_if_missing_false_edge_rejected():
+    with pytest.raises(SchemaError) as e:
+        validate_workflow(_if_doc(["true"]))
+    assert "true" in str(e.value) and "false" in str(e.value)
+
+
+def test_if_duplicate_true_edge_rejected():
+    with pytest.raises(SchemaError):
+        validate_workflow(_if_doc(["true", "true", "false"]))
+
+
+def test_if_with_exactly_true_and_false_ok():
+    validate_workflow(_if_doc(["true", "false"]))

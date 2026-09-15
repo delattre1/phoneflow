@@ -101,6 +101,7 @@ def validate_workflow(doc: dict) -> dict:
     triggers = [n for n in nodes if n["type"] in TRIGGERS]
     if len(triggers) != 1:
         raise SchemaError("nodes", "exactly one trigger")
+    outgoing: dict[str, list] = {}
     for i, e in enumerate(edges):
         path = f"edges[{i}]"
         if not isinstance(e, dict):
@@ -111,6 +112,17 @@ def validate_workflow(doc: dict) -> dict:
         if src["type"] == "flow.if":
             if e.get("sourceHandle") not in ("true", "false"):
                 raise SchemaError(path + ".sourceHandle", "true|false required")
+        outgoing.setdefault(e["source"], []).append(e)
+    for nid, outs in outgoing.items():
+        src = by_id[nid]
+        if src["type"] == "flow.if":
+            handles = [e.get("sourceHandle") for e in outs]
+            if handles.count("true") != 1 or handles.count("false") != 1:
+                raise SchemaError(
+                    f"nodes[id={nid}]", "flow.if requires exactly one outgoing true edge and one false edge"
+                )
+        elif len(outs) > 1:
+            raise SchemaError("edges", f"node {nid} has more than one outgoing edge")
     _require_confirm_on_pay_paths(by_id, edges)
     return out
 
