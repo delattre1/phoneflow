@@ -265,6 +265,9 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
         if itp is None or itp.run is None:
             self._send(404, {"code": "not_found", "message": "run not found"})
             return
+        if itp.run.get("status") != "awaiting_confirm":
+            self._send(409, {"code": "conflict", "message": "run is not awaiting confirm"})
+            return
         try:
             body = self._read_json()
         except json.JSONDecodeError:
@@ -281,7 +284,7 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
         self._send(200, run)
 
     def _cancel(self, run_id: str) -> None:
-        itp = self.server.interpreters.get(run_id)
+        itp = self.server.interpreters.pop(run_id, None)
         run = itp.run if itp is not None else load_run(self._home(), run_id)
         if run is None:
             self._send(404, {"code": "not_found", "message": "run not found"})
