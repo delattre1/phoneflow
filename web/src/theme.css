@@ -75,6 +75,10 @@ code, .mono { font-family: var(--mono); }
   padding: 8px 20px;
 }
 
+.banner.is-idle {
+  visibility: hidden;
+}
+
 .body {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr) 280px;

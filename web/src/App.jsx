@@ -156,6 +156,12 @@ async function api(path, opts = {}) {
   return body;
 }
 
+function errorText(err) {
+  if (!err) return "";
+  if (typeof err === "string") return err;
+  return err.code || "";
+}
+
 function Field({ label, value, onChange, type = "text" }) {
   return (
     <label className="field">
@@ -372,7 +378,7 @@ export default function App() {
           Runs
         </button>
       </nav>
-      {latchDown && <div className="banner">Open Latch on the Mac</div>}
+      <div className={latchDown ? "banner" : "banner is-idle"}>Open Latch on the Mac</div>
       <div className="body">
         <aside className="rail">
           <div className="toolbar">
@@ -517,7 +523,7 @@ export default function App() {
             </button>
           </div>
           <div className="status">{run ? `${run.status}${run.currentNodeId ? ` @ ${run.currentNodeId}` : ""}` : "idle"}</div>
-          {run?.error && <p className="error">{run.error}</p>}
+          {errorText(run?.error) && <p className="error">{errorText(run?.error)}</p>}
           {error && <p className="error">{error}</p>}
           {run?.status === "awaiting_confirm" && (
             <div>
