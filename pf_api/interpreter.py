@@ -154,6 +154,7 @@ class Interpreter:
             return self._next(handle)
         if ntype == "flow.confirm":
             self.run["status"] = "awaiting_confirm"
+            self._event(node["id"], "awaiting_confirm")
             return None
         if ntype == "auth.vaultUnlock":
             self._vault_item_id = params["vaultItemId"]

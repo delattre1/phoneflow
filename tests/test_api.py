@@ -135,3 +135,83 @@ def test_cancel_then_confirm_does_not_resume(tmp_path):
     finally:
         httpd.shutdown()
 
+
+def test_hostile_origin_rejected(tmp_path):
+    httpd, port, _ = _boot(tmp_path)
+    try:
+        c = HTTPConnection("127.0.0.1", port)
+        c.request("GET", "/api/health", headers={"Origin": "http://evil.com:8787"})
+        resp = c.getresponse()
+        assert resp.status == 403
+        resp.read()
+        c.request("PUT", "/api/workflows/wf_settings_general", json.dumps(SETTINGS),
+                  {"Content-Type": "application/json", "Origin": "http://evil.com:8787"})
+        resp = c.getresponse()
+        assert resp.status == 403
+        resp.read()
+    finally:
+        httpd.shutdown()
+
+
+def test_same_origin_accepted(tmp_path):
+    httpd, port, _ = _boot(tmp_path)
+    try:
+        c = HTTPConnection("127.0.0.1", port)
+        c.request("GET", "/api/health", headers={"Origin": f"http://127.0.0.1:{port}"})
+        resp = c.getresponse()
+        assert resp.status == 200
+        resp.read()
+    finally:
+        httpd.shutdown()
+
+
+def test_phoneflow_origin_env_accepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("PHONEFLOW_ORIGIN", "https://canvas.example")
+    httpd, port, _ = _boot(tmp_path)
+    try:
+        c = HTTPConnection("127.0.0.1", port)
+        c.request("GET", "/api/health", headers={"Origin": "https://canvas.example"})
+        resp = c.getresponse()
+        assert resp.status == 200
+        resp.read()
+    finally:
+        httpd.shutdown()
+
+
+def test_rebinding_origin_with_matching_host_rejected(tmp_path, monkeypatch):
+    # DNS-rebinding shape: Origin netloc equals Host netloc, but Host is not the
+    # configured PHONEFLOW_ORIGIN — must still be denied.
+    monkeypatch.setenv("PHONEFLOW_ORIGIN", "https://canvas.example")
+    httpd, port, _ = _boot(tmp_path)
+    try:
+        c = HTTPConnection("127.0.0.1", port)
+        c.request("GET", "/api/health", headers={"Host": "evil.com:8787", "Origin": "http://evil.com:8787"})
+        resp = c.getresponse()
+        assert resp.status == 403
+        resp.read()
+    finally:
+        httpd.shutdown()
+
+
+def test_events_sse_streams_existing_then_terminal_close(tmp_path):
+    httpd, port, _ = _boot(tmp_path)
+    try:
+        c = HTTPConnection("127.0.0.1", port)
+        c.request("PUT", "/api/workflows/wf_confirm_park", json.dumps(CONFIRM), {"Content-Type": "application/json"})
+        c.getresponse().read()
+        c.request("POST", "/api/runs", json.dumps({"workflowId": "wf_confirm_park"}), {"Content-Type": "application/json"})
+        run_id = json.loads(c.getresponse().read())["runId"]
+        c.close()
+
+        c = HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("GET", f"/api/runs/{run_id}/events")
+        resp = c.getresponse()
+        assert resp.getheader("Content-Type", "").startswith("text/event-stream")
+        # read a few SSE lines; server closes after terminal status flush
+        data = resp.read()
+        assert b"data:" in data
+        evs = [json.loads(ln[5:]) for ln in data.decode().splitlines() if ln.startswith("data:")]
+        assert evs and evs[0]["nodeId"] == "n1" and evs[1]["nodeId"] == "n2"
+        assert evs[1]["code"] == "awaiting_confirm"
+    finally:
+        httpd.shutdown()

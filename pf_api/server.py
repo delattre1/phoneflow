@@ -1,9 +1,20 @@
+"""PhoneFlow stdlib HTTP API.
+
+Same-origin enforcement: any request carrying an Origin header is accepted
+only when the Origin netloc equals the PHONEFLOW_ORIGIN env (when set) or the
+request's own Host header. Residual DNS-rebinding exposure: when
+PHONEFLOW_ORIGIN is unset, an attacker who can also control the Host header
+(possible through some transparent proxies / rebinding setups) still passes;
+deployers on hostile LANs SHOULD pin PHONEFLOW_ORIGIN.
+"""
+
 from __future__ import annotations
 
 import json
 import mimetypes
 import os
 import re
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,19 +51,27 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-    def _path(self) -> str:
-        return urlparse(self.path).path
-
     def _origin_ok(self) -> bool:
         origin = self.headers.get("Origin")
         if not origin:
             return True
-        host = self.headers.get("Host", "")
         netloc = urlparse(origin).netloc
-        if netloc != host:
+        configured = os.environ.get("PHONEFLOW_ORIGIN")
+        if configured:
+            # Pinned deployment: the configured origin is the only allowed one,
+            # so a DNS-rebinding Host/Origin pair cannot ride the Host fallback.
+            allowed = {urlparse(configured if "//" in configured else f"//{configured}", scheme="http").netloc}
+        else:
+            # Residual DNS-rebinding exposure (see module docstring): without a
+            # pin, a rebinding attacker who controls both Host and Origin passes.
+            allowed = {self.headers.get("Host", "")}
+        if netloc not in allowed or not netloc:
             self._send(403, {"code": "forbidden", "message": "cross-origin denied"})
             return False
         return True
+
+    def _path(self) -> str:
+        return urlparse(self.path).path
 
     def _read_json(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -139,13 +158,7 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             return
         m = _RUN_EVENTS.match(path)
         if m:
-            run_id = m.group(1)
-            if load_run(self._home(), run_id) is None:
-                self._send(404, {"code": "not_found", "message": "run not found"})
-                return
-            events = load_events(self._home(), run_id)
-            chunks = "".join(f"data: {json.dumps(ev)}\n\n" for ev in events)
-            self._send(200, chunks, "text/event-stream")
+            self._stream_events(m.group(1))
             return
         m = _RUN_FRAME.match(path)
         if m:
@@ -164,6 +177,31 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             self._send(200, run)
             return
         self._send(404, {"code": "not_found", "message": "no such route"})
+
+    def _stream_events(self, run_id: str) -> None:
+        # Real SSE: flush the persisted lines, then poll events.jsonl until the
+        # run reaches a terminal status (cheap: file reads, no interpreter hold).
+        if load_run(self._home(), run_id) is None:
+            self._send(404, {"code": "not_found", "message": "run not found"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        sent = 0
+        try:
+            while True:
+                run = load_run(self._home(), run_id)
+                events = load_events(self._home(), run_id)
+                for ev in events[sent:]:
+                    self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                sent = len(events)
+                self.wfile.flush()
+                if run is None or run.get("status") not in ("running", "queued"):
+                    break
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def do_PUT(self):
         if not self._origin_ok():
@@ -252,12 +290,15 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             [],
         )
         itp = Interpreter(self.server.driver)
+        self.server.interpreters[run_id] = itp
         run = itp.start(doc)
         run["id"] = run_id
+        self._persist(itp)  # running state observable while the run executes
         while run["status"] == "running":
             run = itp.tick()
+            if run["status"] == "running":
+                self._persist(itp)
         self._persist(itp)
-        self.server.interpreters[run_id] = itp
         self._send(200, {"runId": run_id})
 
     def _confirm(self, run_id: str) -> None:
@@ -274,12 +315,12 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             self._send(400, {"code": "validation", "path": "$", "message": "invalid json"})
             return
         decision = body.get("decision") if isinstance(body, dict) else None
-        if decision not in ("approve", "deny"):
-            self._send(400, {"code": "validation", "path": "decision", "message": "approve or deny"})
-            return
         run = itp.resume_confirm(decision)
+        self._persist(itp)
         while run["status"] == "running":
             run = itp.tick()
+            if run["status"] == "running":
+                self._persist(itp)
         self._persist(itp)
         self._send(200, run)
 
