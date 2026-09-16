@@ -180,6 +180,8 @@ def _ocr_handler(lines, binary_ready=True):
             return {"content": [{"type": "text", "text": json.dumps({"exit_code": 0, "output": out})}]}
         if method == "tools/call" and params["name"] == "plow_read_file":
             return {"bytes": b"frame"}
+        if method == "tools/call" and params["name"] == "plow_write_file":
+            return _envelope({"status": "completed"})
         raise AssertionError(params.get("name", method))
 
     return handler
@@ -274,3 +276,25 @@ def test_latch_driver_refuses_taps_in_the_title_bar_band():
     drv.health()
     with pytest.raises(DriverError):
         drv.tap_point(150, 110)  # window top is 100, title bar is 28pt: this is the Mac
+
+
+def test_helper_paths_resolve_against_the_macs_home_not_the_containers():
+    # The agent runs as root in a container; expanding "~" locally gives /root,
+    # which does not exist on the owner's Mac.
+    written = []
+
+    def handler(method, params, msg):
+        name = params.get("name")
+        if name == "plow_run_applescript":
+            script = params["arguments"]["script"]
+            out = "/Users/owner" if "echo $HOME" in script else ("no" if "test -x" in script else "")
+            return _envelope({"exit_code": 0, "output": out})
+        if name == "plow_write_file":
+            written.append(params["arguments"]["path"])
+            return _envelope({"status": "completed"})
+        raise AssertionError(name)
+
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
+    drv.health()
+    drv._ensure_ocr()
+    assert written and all(p.startswith("/Users/owner/") for p in written), written

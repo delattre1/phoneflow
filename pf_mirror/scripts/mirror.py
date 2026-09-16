@@ -142,6 +142,35 @@ post(.leftMouseUp, x2, y2)
 print("OK")
 """
 
+OBSERVE_SCRIPT = r"""#!/bin/sh
+# PhoneFlow observation — one round trip instead of fourteen.
+#
+# Capturing a frame used to cost ~14 separate calls through the Plow relay
+# (capture, read, base64, window, crop, OCR, JPEG, read, base64...), each with
+# its own approval and latency, which dominated every step of the agent loop.
+# This does the whole thing on the Mac and prints one JSON object:
+#   {"ocr": <pf_ocr output>, "frame": "<base64 jpeg of the window crop>"}
+#
+# usage: pf_observe.sh <x> <y> <w> <h> <scale> [upscale] [jpegmax]
+set -e
+X=$1; Y=$2; W=$3; H=$4; S=$5; UP=${6:-3}; JMAX=${7:-900}
+D="${TMPDIR:-/tmp}"; F="$D/pf_full.png"; C="$D/pf_win.png"; J="$D/pf_win.jpg"
+screencapture -x "$F"
+# Crop in pixels (the capture is Retina, the window is in points), then upscale:
+# at 316x696pt the tab-bar labels are ~8pt and Vision misses them entirely.
+sips -c "$(echo "$H*$S" | bc | cut -d. -f1)" "$(echo "$W*$S" | bc | cut -d. -f1)" \
+     --cropOffset "$(echo "$Y*$S" | bc | cut -d. -f1)" "$(echo "$X*$S" | bc | cut -d. -f1)" \
+     "$F" --out "$C" >/dev/null
+# -Z sets the LONGEST side, which for a phone window is the height. Passing the
+# width here silently shrank the crop instead of enlarging it, undoing the
+# upscale that lets Vision read the ~8pt tab-bar labels.
+LONG=$(echo "$H*$S*$UP" | bc | cut -d. -f1)
+sips -Z "$LONG" "$C" >/dev/null
+OCR=$("$HOME/.phoneflow/pf_ocr" "$C")
+sips -s format jpeg -s formatOptions 70 -Z "$JMAX" "$C" --out "$J" >/dev/null
+printf '{"ocr":%s,"frame":"%s"}' "$OCR" "$(base64 -i "$J")"
+"""
+
 LOCK_RE = re.compile(r"Passcode|Touch ID|Enter Password|Código|Senha do Mac")
 TITLES = ("iPhone Mirroring", "Espelhamento do iPhone")
 MIRROR_TITLEBAR_PX = int(os.environ.get("MIRROR_TITLEBAR_PX", "28"))
@@ -149,6 +178,7 @@ FRAME_PATH = os.environ.get("PHONEFLOW_FRAME_PATH", "/tmp/phoneflow.png")
 # Mac-side Vision OCR helper (mac/pf_ocr.swift), installed by _ensure_ocr().
 OCR_DIR = os.environ.get("PHONEFLOW_OCR_DIR", "$HOME/.phoneflow")
 OCR_BIN = OCR_DIR + "/pf_ocr"
+OBSERVE_SH = OCR_DIR + "/pf_observe.sh"
 DRAG_BIN = OCR_DIR + "/pf_drag"
 _UNSET = object()
 
@@ -250,6 +280,8 @@ class LatchDriver:
         self._ocr_lines_cache: list[dict] = []
         self._scale: float = 0.0
         self._crop_geom: dict = {}
+        self._home: str = ""
+        self._observe_ready = False
         if transport is _UNSET:
             url = os.environ.get("PLOW_MCP_URL")
             token = agent_token or os.environ.get("PLOW_AGENT_TOKEN") or ""
@@ -500,6 +532,20 @@ class LatchDriver:
         self._applescript('do shell script "screencapture -x %s"' % path)
         return self.read_file(path)
 
+    def _mac_home(self) -> str:
+        """The Mac's home directory, asked of the Mac.
+
+        The agent runs in a container as root, so expanding "~" locally yields
+        /root — a path that does not exist on the owner's machine. Helper paths
+        are written through Latch, so they must be resolved there.
+        """
+        if not self._home:
+            self._home = self._applescript('do shell script "echo $HOME"').strip() or "/tmp"
+        return self._home
+
+    def _on_mac(self, path: str) -> str:
+        return path.replace("$HOME", self._mac_home())
+
     def _ensure_ocr(self) -> None:
         """Compile the Vision OCR helper on the Mac if it is not there yet.
 
@@ -509,6 +555,11 @@ class LatchDriver:
         """
         if self._ocr_ready:
             return
+        if not self._observe_ready:
+            self._call("plow_write_file",
+                       {"path": self._on_mac(OBSERVE_SH), "content": OBSERVE_SCRIPT})
+            self._applescript('do shell script "mkdir -p %s && chmod +x %s"' % (OCR_DIR, OBSERVE_SH))
+            self._observe_ready = True
         for binary, source, code in (
             (OCR_BIN, OCR_DIR + "/pf_ocr.swift", OCR_SWIFT),
             (DRAG_BIN, OCR_DIR + "/pf_drag.swift", DRAG_SWIFT),
@@ -518,8 +569,7 @@ class LatchDriver:
             ).strip()
             if probe == "yes":
                 continue
-            self._call("plow_write_file", {"path": source.replace("$HOME", os.path.expanduser("~")),
-                                           "content": code})
+            self._call("plow_write_file", {"path": self._on_mac(source), "content": code})
             try:
                 self._applescript(
                     'do shell script "mkdir -p %s && xcrun swiftc -O -o %s %s"'
@@ -576,6 +626,39 @@ class LatchDriver:
             "px_w": int(data.get("w") or 0), "px_h": int(data.get("h") or 0),
         }
         return lines
+
+    def observe(self) -> tuple[list[dict], bytes, dict]:
+        """Capture, crop, OCR and encode in a single round trip.
+
+        Doing this piecemeal cost about fourteen calls through the Plow relay
+        per step — capture, read, base64, window, crop, OCR, JPEG, read... each
+        with its own approval — and that, not the models, was most of the wall
+        clock in the agent loop. Returns (items in screen points, JPEG of the
+        window crop, geometry for mapping grounder boxes back).
+        """
+        self._ensure_ocr()
+        _, _, pos, size = self._window()
+        scale = self._pixel_scale()
+        out = self._applescript(
+            'do shell script "%s %d %d %d %d %s"'
+            % (OBSERVE_SH, int(pos[0]), int(pos[1]), int(size[0]), int(size[1]), scale)
+        )
+        try:
+            data = json.loads(out)
+            ocr = data.get("ocr") or {}
+            frame = base64.b64decode(data.get("frame") or "", validate=False)
+        except Exception as exc:
+            raise DriverError("observe_failed", f"could not parse observation: {exc}") from exc
+        items = []
+        for l in ocr.get("lines") or []:
+            items.append({
+                "t": l.get("t", ""),
+                "x": pos[0] + float(l.get("nx", 0)) * size[0],
+                "y": pos[1] + float(l.get("ny", 0)) * size[1],
+            })
+        geom = {"pos": pos, "size": size, "titlebar": self.titlebar_px,
+                "px_w": int(ocr.get("w") or 0), "px_h": int(ocr.get("h") or 0)}
+        return items, frame, geom
 
     def window_crop(self, frame: bytes) -> tuple[bytes, dict]:
         """The mirror window alone, upscaled, as JPEG — plus how to map it back.

@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir pydantic pydantic-settings python-dotenv pyyaml o
 
 ENV PYTHONPATH=/opt/phoneflow \
     PHONEFLOW_AGENT_MODEL=glm-5.3-flash \
+    PHONEFLOW_GROUNDER_MODEL=qwen3.5:397b \
     PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1 \
     PHONEFLOW_HOME=/data \
     PHONEFLOW_WEB=/opt/phoneflow/web \

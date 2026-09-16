@@ -331,3 +331,58 @@ def test_grounder_drops_icons_in_the_mac_title_bar():
                         '{"label":"search","bbox_2d":[400,300,500,360]}]')
     items = IconGrounder(FakeClient([reply]), model="qwen").find(b"jpg", geom)
     assert [i["t"] for i in items] == ["[icon] search"]
+
+
+def test_only_the_newest_screenshot_is_kept_in_the_conversation():
+    # Each turn appends a frame; by step ten the request would carry ten images
+    # of screens that no longer exist.
+    loop, _ = _loop([tool("swipe", direction="up", why="a"),
+                     tool("swipe", direction="down", why="b"),
+                     tool("done", summary="ok")])
+    loop.run("scroll about")
+    last = loop.client.requests[-1]["messages"]
+    images = [c for m in last if isinstance(m.get("content"), list)
+              for c in m["content"] if c.get("type") == "image_url"]
+    assert len(images) == 1
+    # the earlier turns keep their text, so the history is not lost
+    texts = [c["text"] for m in last if isinstance(m.get("content"), list)
+             for c in m["content"] if c.get("type") == "text"]
+    assert len(texts) >= 3
+
+
+def test_grounder_reuses_icons_while_the_screen_text_is_unchanged():
+    # The JPEG differs every frame (clock, video, compression), so an image hash
+    # never hits and every step would pay for grounding again.
+    from pf_api.agent import IconGrounder
+    client = FakeClient([GroundReply('[{"label":"search","bbox_2d":[400,60,500,120]}]')])
+    g = IconGrounder(client, model="qwen")
+    geom = {"pos": (100, 100), "size": (300, 600), "px_w": 900, "px_h": 1800}
+    screen = [{"t": "Home", "x": 1, "y": 1}, {"t": "23:30", "x": 1, "y": 1}]
+    first = g.find(b"jpeg-frame-1", geom, screen)
+    again = g.find(b"jpeg-frame-2", geom, [{"t": "Home", "x": 1, "y": 1}, {"t": "23:31", "x": 1, "y": 1}])
+    assert first == again
+    assert len(client.requests) == 1            # only the clock moved: no second call
+    g.find(b"jpeg-frame-3", geom, [{"t": "Settings", "x": 1, "y": 1}])
+    assert len(client.requests) == 2            # real change: grounds again
+
+
+def test_grounder_reports_a_truncated_reply_rather_than_pretending_there_are_no_icons(capsys):
+    from pf_api.agent import IconGrounder
+
+    class Truncated:
+        class _C:
+            @staticmethod
+            def create(**kw):
+                msg = type("M", (), {"content": ""})()
+                return type("R", (), {"choices": [type("C", (), {"message": msg, "finish_reason": "length"})()]})()
+        chat = type("Chat", (), {"completions": _C()})()
+
+    assert IconGrounder(Truncated(), model="flash").find(b"jpg", {}) == []
+    assert "finish_reason=length" in capsys.readouterr().out
+
+
+def test_planner_and_grounder_default_to_different_models():
+    # Planning is judgement and wants speed; grounding is precision, where the
+    # fast model measured 76pt off against a 44pt tap target.
+    import pf_api.agent as a
+    assert a.MODEL != a.GROUNDER_MODEL

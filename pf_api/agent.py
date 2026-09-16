@@ -52,7 +52,17 @@ MAX_TOKENS = int(os.environ.get("PHONEFLOW_AGENT_MAX_TOKENS", "8000"))
 # died on exactly that. The Qwen-VL family is trained to return bounding boxes,
 # so a second, cheaper pass over the window crop turns icons into list items.
 # Set PHONEFLOW_GROUNDER_MODEL="" to disable.
-GROUNDER_MODEL = os.environ.get("PHONEFLOW_GROUNDER_MODEL", "glm-5.3-flash")
+# Split by what each role actually needs. Planning is judgement, and the fast
+# model does it in ~7s against ~40s. Grounding is precision, and there the split
+# is stark: measured against OCR ground truth on the same frame, qwen3.5 lands
+# within 2pt while glm-5.3-flash is 76pt and kimi-k3 422pt out — against a 44pt
+# tap target, which means those two simply miss the icon they aimed at.
+GROUNDER_MODEL = os.environ.get("PHONEFLOW_GROUNDER_MODEL", "qwen3.5:397b")
+# The grounder is a reasoning model too: its thinking is billed against this
+# budget and comes before the JSON, so a tight cap returns an empty reply with
+# finish_reason "length" and no icons at all — indistinguishable from a screen
+# that simply has none.
+GROUNDER_MAX_TOKENS = int(os.environ.get("PHONEFLOW_GROUNDER_MAX_TOKENS", "16000"))
 # Which coordinate space the grounder answers in is a property of the model, not
 # of the request: measured on the same crop, qwen3.5 returns a 0-1000 grid and
 # glm-5.3-flash returns real pixels. Guessing wrong is not a small error — it
@@ -194,8 +204,19 @@ class IconGrounder:
     def find(self, crop: bytes, geom: dict, anchors: list[dict] | None = None) -> list[dict]:
         if not self.model or not crop:
             return []
-        key = hashlib.sha256(crop).hexdigest()
-        if key == self._key:
+        # Keyed on the screen's text, not on the image. The JPEG differs every
+        # frame — the clock ticks, video plays, compression wobbles — so hashing
+        # the bytes never hit and every step paid for grounding again, which is
+        # the single most expensive thing in the loop. The same text means the
+        # same screen, and the same icons.
+        key = hashlib.sha256(
+            "\u0000".join(sorted(
+                a.get("t", "") for a in (anchors or [])
+                if not CLOCK_RE.match(a.get("t", ""))
+            )).encode("utf-8")
+        ).hexdigest()
+        if key and key == self._key:
+            print("[grounder] cached", flush=True)
             return self._cache
         # A handful of OCR lines whose true position is already known. Asking the
         # model to box them too costs nothing and reveals which coordinate space
@@ -206,13 +227,16 @@ class IconGrounder:
         try:
             reply = self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=4000,
+                max_tokens=GROUNDER_MAX_TOKENS,
                 messages=[{"role": "user", "content": [
                     {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
                     {"type": "text", "text": prompt},
                 ]}],
             )
             text = reply.choices[0].message.content or ""
+            if not text.strip():
+                reason = getattr(reply.choices[0], "finish_reason", "") or "unknown"
+                print(f"[grounder] empty reply (finish_reason={reason})", flush=True)
         except Exception as exc:  # grounding is an aid, not a dependency
             print(f"[grounder] failed: {exc}", flush=True)
             return []
@@ -331,11 +355,18 @@ class AgentLoop:
     # ---- perception ----------------------------------------------------
 
     def _observe(self) -> tuple[bytes, list[dict]]:
-        frame = self.driver.screenshot()
-        items = list(self.driver.ocr_items(frame))
-        if self.grounder is not None and hasattr(self.driver, "window_crop"):
+        if hasattr(self.driver, "observe"):
+            items, frame, geom = self.driver.observe()
+            items = list(items)
+        else:  # drivers without the fused call (tests, older mirrors)
+            raw = self.driver.screenshot()
+            items, frame, geom = list(self.driver.ocr_items(raw)), self.driver.frame_for_model(), None
+        if self.grounder is not None:
             try:
-                crop, geom = self.driver.window_crop(frame)
+                if geom is None:
+                    crop, geom = self.driver.window_crop(raw)
+                else:
+                    crop = frame
                 icons = self.grounder.find(crop, geom, items)
             except Exception as exc:  # never let the aid take the run down
                 print(f"[grounder] skipped: {exc}", flush=True)
@@ -344,7 +375,7 @@ class AgentLoop:
                 print(f"[grounder] {len(icons)} icons: "
                       + ", ".join(i["t"].replace("[icon] ", "") for i in icons), flush=True)
             items.extend(icons)
-        return self.driver.frame_for_model(), items
+        return frame, items
 
     @staticmethod
     def _signature(items: list[dict]) -> tuple:
@@ -486,6 +517,7 @@ class AgentLoop:
                 self._dead.add(last_key)
                 note = "The screen did not change after your last action. Try something else.\n\n"
             prev_sig = sig
+            self._strip_old_images(messages)
             messages.append(self._turn(goal, small, items, self.max_steps - step, note))
             reply = self.client.chat.completions.create(
                 model=self.model,
@@ -570,6 +602,23 @@ class AgentLoop:
                     last_key = None
             messages.append({"role": "tool", "tool_call_id": call.id, "content": observation})
         return self._finish("out_of_steps", f"budget of {self.max_steps} steps exhausted", self.max_steps)
+
+    @staticmethod
+    def _strip_old_images(messages: list[dict]) -> None:
+        """Keep only the newest screenshot in the conversation.
+
+        Every turn appends a fresh frame, so by step ten the request carries ten
+        images of screens that no longer exist — slower each step, and the stale
+        ones actively mislead. The text of each turn stays, so the model still
+        has the history of what it saw and did.
+        """
+        for m in messages:
+            content = m.get("content")
+            if not isinstance(content, list):
+                continue
+            kept = [c for c in content if c.get("type") != "image_url"]
+            if len(kept) != len(content):
+                m["content"] = kept or [{"type": "text", "text": "(earlier screen)"}]
 
     def _finish(self, status: str, message: str, step: int) -> dict:
         return {"status": status, "message": message, "steps": self.steps, "used": step + 1}

@@ -12,7 +12,7 @@ services:
       PHONEFLOW_LLM_API_KEY: ${PHONEFLOW_LLM_API_KEY:-}
       PHONEFLOW_LLM_BASE_URL: ${PHONEFLOW_LLM_BASE_URL:-https://ollama.com/v1}
       PHONEFLOW_AGENT_MODEL: ${PHONEFLOW_AGENT_MODEL:-glm-5.3-flash}
-      PHONEFLOW_GROUNDER_MODEL: ${PHONEFLOW_GROUNDER_MODEL:-glm-5.3-flash}
+      PHONEFLOW_GROUNDER_MODEL: ${PHONEFLOW_GROUNDER_MODEL:-qwen3.5:397b}
     volumes:
       - ./plow-credentials:/var/lib/plow/credentials.host:ro
       - agent-home:/var/lib/hermes
