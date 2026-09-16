@@ -118,27 +118,75 @@ def test_latch_driver_unconfigured_raises_disconnected():
     assert e.value.code == "latch_disconnected"
 
 
-def test_latch_driver_screenshot_via_bridge():
-    def handler(method, params, msg):
-        if method == "tools/call" and params["name"] == "plow_run_command":
-            return {"content": [{"type": "text", "text": "iPhone Mirroring\t0,0\t400,600"}]}
-        if method == "tools/call" and params["name"] == "plow_read_file":
-            return {"bytes": b"\x89PNG\r\n\x1a\n"}
-        raise AssertionError(method)
+def _envelope(obj):
+    return {"content": [{"type": "text", "text": json.dumps(obj)}]}
 
-    tr = FakeTransport(handler)
-    drv = LatchDriver(transport=tr, agent_token="tok")
+
+def test_latch_driver_screenshot_via_bridge():
+    # Mirrors the real Latch: a binary read answers only a byte count, so the
+    # driver must stage a base64 copy and read that instead.
+    png = b"\x89PNG\r\n\x1a\n"
+
+    def handler(method, params, msg):
+        name = params.get("name")
+        if name == "plow_run_applescript":
+            return _envelope({"exit_code": 0, "output": ""})
+        if name == "plow_read_file":
+            path = params["arguments"]["path"]
+            if path.endswith(".b64"):
+                return _envelope({"content": base64.b64encode(png).decode()})
+            return _envelope({"bytes": len(png)})
+        raise AssertionError(name)
+
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
     drv.health()
-    assert drv.screenshot() == b"\x89PNG\r\n\x1a\n"
+    assert drv.screenshot() == png
+
+
+def test_latch_driver_read_file_returns_text_inline():
+    def handler(method, params, msg):
+        if params.get("name") == "plow_read_file":
+            return _envelope({"content": "hello\n"})
+        raise AssertionError(params.get("name"))
+
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
+    drv.health()
+    assert drv.read_file("/tmp/x.txt") == b"hello\n"
+
+
+def _ocr_handler(lines, binary_ready=True):
+    """Fake Latch that answers the screenshot, the OCR probe and the OCR run."""
+
+    def handler(method, params, msg):
+        if method == "tools/call" and params["name"] == "plow_run_applescript":
+            script = params["arguments"]["script"]
+            if "test -x" in script:
+                out = "yes" if binary_ready else "no"
+            elif "sips" in script:
+                out = ""
+            elif "position" in script:
+                out = "iPhone Mirroring, 100, 100, 300, 600"
+            elif "pf_ocr" in script:
+                # The binary reports boxes normalised to the cropped window; the
+                # fixture takes screen points and converts, so the tests stay
+                # readable in the coordinates that actually get clicked.
+                norm = [
+                    {"t": l["t"], "nx": (l["x"] - 100) / 300.0, "ny": (l["y"] - 100) / 600.0}
+                    for l in lines
+                ]
+                out = json.dumps({"w": 900, "h": 1800, "sw": 900, "sh": 1800, "lines": norm})
+            else:
+                out = ""
+            return {"content": [{"type": "text", "text": json.dumps({"exit_code": 0, "output": out})}]}
+        if method == "tools/call" and params["name"] == "plow_read_file":
+            return {"bytes": b"frame"}
+        raise AssertionError(params.get("name", method))
+
+    return handler
 
 
 def test_latch_driver_tap_label_missing_fails_element_not_found():
-    def handler(method, params, msg):
-        if method == "tools/call" and params["name"] == "plow_run_command":
-            return {"content": [{"type": "text", "text": "iPhone Mirroring\t0,0\t400,600"}]}
-        if method == "tools/call" and params["name"] == "plow_read_file":
-            return {"bytes": b"frame"}
-        raise AssertionError(method)
+    handler = _ocr_handler([])
 
     drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
     drv.health()
@@ -157,3 +205,72 @@ def test_latch_driver_vault_fill_is_manual():
 def test_latch_driver_does_not_set_ocr_text():
     drv = LatchDriver(transport=FakeTransport())
     assert not hasattr(drv, "ocr_text")
+
+
+def test_latch_driver_tap_label_clicks_ocr_coordinates():
+    # Window is at (100,100) sized 300x600, so (250,400) sits inside it.
+    handler = _ocr_handler([{"t": "General", "x": 250, "y": 400}])
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
+    drv.health()
+    drv.tap_label("General")
+    assert ("tap_label", "General") in drv.commands
+    # Must go through the CGEvent helper: System Events' `click at` posts no
+    # real mouse event and the mirrored phone ignores it.
+    clicks = [c for c in drv.scripts if "pf_drag" in c]
+    assert clicks and "250" in clicks[-1] and "400" in clicks[-1]
+    assert not [c for c in drv.scripts if "click at" in c]
+
+
+def test_latch_driver_tap_point_refuses_a_target_off_the_phone():
+    # OCR can no longer offer a desktop target (the crop bounds it), but a
+    # coordinate reaching tap_point directly still has to be refused.
+    handler = _ocr_handler([])
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
+    drv.health()
+    with pytest.raises(DriverError) as e:
+        drv.tap_point(900, 50)
+    assert e.value.code == "tap_out_of_bounds"
+
+
+def test_latch_driver_ocr_caches_on_frame_bytes():
+    handler = _ocr_handler([{"t": "Wi-Fi", "x": 250, "y": 400}])
+    tr = FakeTransport(handler)
+    drv = LatchDriver(transport=tr, agent_token="tok")
+    drv.health()
+    assert drv.ocr(b"frame-a") == "Wi-Fi"
+    runs = lambda: len([c for c in tr.calls if "pf_ocr" in c["body"]])
+    first = runs()
+    drv.ocr(b"frame-a")          # same frame: served from cache
+    assert runs() == first
+    drv.ocr(b"frame-b")          # new frame: re-runs on the Mac
+    assert runs() == first + 1
+
+
+def test_latch_driver_swipe_uses_the_drag_binary_not_inline_applescript():
+    # AppleScript-ObjC cannot pass a CGEventRef to CGEventPost, so the inline
+    # drag script exited 1 and every scroll was a silent no-op.
+    handler = _ocr_handler([])
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
+    drv.health()
+    drv.swipe({"x": 0.5, "y": 0.75}, {"x": 0.5, "y": 0.25}, 400)
+    sent = drv.scripts[-1]
+    assert "pf_drag" in sent
+    assert "CGEventPost" not in sent
+
+
+def test_latch_driver_focuses_the_window_before_tapping():
+    # An unfocused mirror window consumes the first click to raise itself, so a
+    # tap without a preceding focus is spent on the window, not the phone.
+    drv = LatchDriver(transport=FakeTransport(_ocr_handler([])), agent_token="tok")
+    drv.health()
+    drv.tap_point(200, 300)
+    joined = "\n".join(drv.scripts)
+    assert "frontmost" in joined
+    assert joined.index("frontmost") < joined.index("pf_drag")
+
+
+def test_latch_driver_refuses_taps_in_the_title_bar_band():
+    drv = LatchDriver(transport=FakeTransport(_ocr_handler([])), agent_token="tok")
+    drv.health()
+    with pytest.raises(DriverError):
+        drv.tap_point(150, 110)  # window top is 100, title bar is 28pt: this is the Mac

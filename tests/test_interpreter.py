@@ -218,3 +218,72 @@ def test_swipe_node_reaches_driver():
     run = Interpreter(drv).run_all(doc)
     assert run["status"] == "succeeded"
     assert ("swipe", {"x": 0.5, "y": 0.8}, {"x": 0.5, "y": 0.2}, 300) in drv.calls
+
+
+def test_agent_task_node_runs_the_loop_and_continues():
+    from pf_api.agent import AgentLoop
+    from tests.test_agent import FakeClient, tool
+
+    doc = {
+        "id": "wf_a", "name": "agent", "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+            {"id": "n2", "type": "agent.task", "position": {"x": 0, "y": 1},
+             "params": {"goal": "find the thing", "maxSteps": 4}},
+        ],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+    drv = FakeDriver(items=[{"t": "Trending", "x": 10, "y": 20}])
+    itp = Interpreter(drv, agent_kwargs={"client": FakeClient([tool("done", summary="found it")]), "grounder": None})
+    run = itp.start(doc)
+    while run["status"] == "running":
+        run = itp.tick()
+    assert run["status"] == "succeeded"
+    assert itp.agent_results[0]["message"] == "found it"
+
+
+def test_agent_task_persists_its_steps_into_the_run_events():
+    # The loop's steps live in memory; without an event trail a failed goal is
+    # unrecoverable once the process restarts.
+    from tests.test_agent import FakeClient, tool
+
+    doc = {
+        "id": "wf_b", "name": "agent", "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+            {"id": "n2", "type": "agent.task", "position": {"x": 0, "y": 1},
+             "params": {"goal": "look around"}},
+        ],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+    drv = FakeDriver(items=[{"t": "Trending", "x": 10, "y": 20}])
+    client = FakeClient([tool("swipe", direction="up", why="scroll"), tool("done", summary="saw it")])
+    itp = Interpreter(drv, agent_kwargs={"client": client, "grounder": None})
+    run = itp.start(doc)
+    while run["status"] == "running":
+        run = itp.tick()
+    codes = [e["code"] for e in itp.events]
+    assert any(c.startswith("agent.swipe:") for c in codes)
+    assert any(c.startswith("agent.succeeded:saw it") for c in codes)
+
+
+def test_agent_give_up_fails_the_run_rather_than_reporting_success():
+    from tests.test_agent import FakeClient, tool
+
+    doc = {
+        "id": "wf_c", "name": "agent", "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+            {"id": "n2", "type": "agent.task", "position": {"x": 0, "y": 1},
+             "params": {"goal": "something impossible"}},
+        ],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+    client = FakeClient([tool("give_up", reason="no path to the trending tab")])
+    itp = Interpreter(FakeDriver(), agent_kwargs={"client": client, "grounder": None})
+    run = itp.start(doc)
+    while run["status"] == "running":
+        run = itp.tick()
+    assert run["status"] == "failed"
+    assert run["error"]["code"] == "agent_gave_up"
+    assert any("no path to the trending tab" in e["code"] for e in itp.events)
