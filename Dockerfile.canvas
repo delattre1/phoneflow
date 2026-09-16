@@ -1,0 +1,20 @@
+FROM python:3.13-slim
+
+WORKDIR /opt/phoneflow
+COPY pf_api/ ./pf_api/
+COPY pf_mirror/ ./pf_mirror/
+COPY web/dist/ ./web/
+COPY workflows/ ./workflows/
+
+RUN pip install --no-cache-dir pydantic pydantic-settings python-dotenv pyyaml \
+ && chmod -R 0755 /opt/phoneflow
+
+ENV PYTHONPATH=/opt/phoneflow \
+    PHONEFLOW_HOME=/data \
+    PHONEFLOW_WEB=/opt/phoneflow/web \
+    PHONEFLOW_PORT=8787 \
+    PHONEFLOW_DRIVER=latch
+
+VOLUME /data
+EXPOSE 8787
+CMD ["python3", "-m", "pf_api"]

@@ -244,7 +244,7 @@ class LatchDriver:
         return "\n".join(parts)
 
     def run_command(self, argv: list[str]) -> str:
-        result = self._call("plow_run_command", {"command": argv})
+        result = self._call("plow_run_command", {"argv": argv})
         return self._text(result)
 
     def run_applescript(self, src: str) -> str:
