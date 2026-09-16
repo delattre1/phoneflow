@@ -23,6 +23,7 @@ headers, body)>; the fake transport keeps every test off the network.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -32,9 +33,123 @@ import urllib.request
 
 from pf_api.driver import DriverError
 
+OCR_SWIFT = r"""// PhoneFlow OCR — macOS Vision text recognition over a screenshot.
+//
+// Prints one JSON object on stdout:
+//   {"w":<image px>,"h":<image px>,"lines":[{"t":"text","nx":0..1,"ny":0..1}]}
+//
+// nx/ny are the CENTRE of each recognised line, normalised to the image with a
+// TOP-LEFT origin (Vision's own boxes are bottom-left, so the flip happens
+// here). Normalised rather than absolute because the caller crops and upscales
+// the mirror window before OCR — only it knows where that crop sits on screen.
+import Foundation
+import Vision
+import AppKit
+
+let args = CommandLine.arguments
+guard args.count > 1, let img = NSImage(contentsOfFile: args[1]),
+      let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+    FileHandle.standardError.write("usage: pf_ocr <image>\n".data(using: .utf8)!)
+    exit(2)
+}
+
+let sw = Double(cg.width), sh = Double(cg.height)
+// Screen size in points as well: the caller crops in pixels but clicks in
+// points, and the ratio between the two is the display's backing scale.
+let scr = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: sw, height: sh)
+
+let req = VNRecognizeTextRequest()
+req.recognitionLevel = .accurate
+req.usesLanguageCorrection = true
+req.recognitionLanguages = ["pt-BR", "en-US"]
+
+try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
+
+var out: [String] = []
+for obs in (req.results ?? []) {
+    guard let top = obs.topCandidates(1).first else { continue }
+    let b = obs.boundingBox
+    let cx = Double(b.origin.x) + Double(b.width) / 2.0
+    let cy = 1.0 - (Double(b.origin.y) + Double(b.height) / 2.0)
+    let esc = top.string.data(using: .utf8).flatMap {
+        String(data: try! JSONSerialization.data(withJSONObject: [String(data: $0, encoding: .utf8)!]), encoding: .utf8)
+    } ?? "[\"\"]"
+    let t = String(esc.dropFirst().dropLast())
+    out.append("{\"t\":\(t),\"nx\":\(cx),\"ny\":\(cy)}")
+}
+print("{\"w\":\(Int(sw)),\"h\":\(Int(sh)),\"sw\":\(Int(scr.width)),\"sh\":\(Int(scr.height)),\"lines\":[\(out.joined(separator: ","))]}")
+"""
+
+DRAG_SWIFT = r"""// PhoneFlow drag — a real mouse drag via CoreGraphics.
+//
+// AppleScript-ObjC cannot pass a CGEventRef back into CGEventPost (it fails to
+// coerce to {__CGEvent=}), so the drag cannot live in an inline script the way
+// `click at` does. This binary is the equivalent that actually works.
+//
+// usage: pf_drag <x> <y>                          -> click
+//        pf_drag <x> <y> <holdMs>                 -> long press
+//        pf_drag <x1> <y1> <x2> <y2> <durationMs> -> drag
+import Foundation
+import CoreGraphics
+
+let a = CommandLine.arguments
+guard a.count >= 3, let x1 = Double(a[1]), let y1 = Double(a[2]) else {
+    FileHandle.standardError.write("usage: pf_drag x y | x1 y1 x2 y2 durationMs\n".data(using: .utf8)!)
+    exit(2)
+}
+let isClick = a.count < 6
+let holdMs = a.count == 4 ? (Double(a[3]) ?? 0.0) : 0.0
+let x2 = isClick ? x1 : (Double(a[3]) ?? x1)
+let y2 = isClick ? y1 : (Double(a[4]) ?? y1)
+let ms = isClick ? 0.0 : (Double(a[5]) ?? 300.0)
+
+let src = CGEventSource(stateID: .hidSystemState)
+
+func post(_ type: CGEventType, _ x: Double, _ y: Double) {
+    CGEvent(mouseEventSource: src, mouseType: type,
+            mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)?
+        .post(tap: .cghidEventTap)
+}
+
+// A click still needs the cursor moved there first: System Events' `click at`
+// posts no real mouse event, so iPhone Mirroring ignored it entirely — moving
+// then pressing is what the mirrored phone actually reacts to.
+post(.mouseMoved, x1, y1)
+usleep(useconds_t(80_000))
+
+if isClick {
+    post(.leftMouseDown, x1, y1)
+    // A long press is the same gesture held: iOS opens context menus on
+    // duration, so the only difference from a tap is how long the button is down.
+    usleep(useconds_t(max(holdMs, 60.0) * 1000))
+    post(.leftMouseUp, x1, y1)
+    print("OK")
+    exit(0)
+}
+
+// iOS reads a swipe from the movement between press and release, so the path is
+// interpolated: a single jump from start to end registers as a tap, not a swipe.
+let steps = 24
+let perStep = max(ms, 120.0) / Double(steps)
+post(.leftMouseDown, x1, y1)
+usleep(useconds_t(30_000))
+for i in 1...steps {
+    let t = Double(i) / Double(steps)
+    post(.leftMouseDragged, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+    usleep(useconds_t(perStep * 1000))
+}
+post(.leftMouseUp, x2, y2)
+print("OK")
+"""
+
 LOCK_RE = re.compile(r"Passcode|Touch ID|Enter Password|Código|Senha do Mac")
 TITLES = ("iPhone Mirroring", "Espelhamento do iPhone")
 MIRROR_TITLEBAR_PX = int(os.environ.get("MIRROR_TITLEBAR_PX", "28"))
+FRAME_PATH = os.environ.get("PHONEFLOW_FRAME_PATH", "/tmp/phoneflow.png")
+# Mac-side Vision OCR helper (mac/pf_ocr.swift), installed by _ensure_ocr().
+OCR_DIR = os.environ.get("PHONEFLOW_OCR_DIR", "$HOME/.phoneflow")
+OCR_BIN = OCR_DIR + "/pf_ocr"
+DRAG_BIN = OCR_DIR + "/pf_drag"
 _UNSET = object()
 
 
@@ -66,12 +181,21 @@ def screenshot_command() -> list[str]:
 
 
 def open_app_script(app: str) -> str:
+    # Typing alone does nothing: the iPhone has to be on the home screen with
+    # Spotlight open first. iPhone Mirroring maps Cmd-1 to Home and Cmd-3 to
+    # Spotlight (key codes 18 and 20), so the sequence is Home, Spotlight, type,
+    # Return. Without the first two the keystrokes land on whatever the phone
+    # was already showing and the app never opens.
     return f'''
--- iPhone Mirroring frontmost; type the app name, then Return on the result.
 tell application "System Events"
+  key code 18 using command down -- Cmd-1: Home Screen
+  delay 1.6
+  key code 20 using command down -- Cmd-3: Spotlight
+  delay 1.6
   keystroke "{app}"
-  delay 0.6
+  delay 2.0
   key code 36 -- Return
+  delay 2.5 -- let the app finish launching before the next frame
 end tell
 '''
 
@@ -121,6 +245,11 @@ class LatchDriver:
         self._session_id: str | None = None
         self._req_id = 0
         self._tools: list[str] = []
+        self._ocr_ready = False
+        self._ocr_key: str = ""
+        self._ocr_lines_cache: list[dict] = []
+        self._scale: float = 0.0
+        self._crop_geom: dict = {}
         if transport is _UNSET:
             url = os.environ.get("PLOW_MCP_URL")
             token = agent_token or os.environ.get("PLOW_AGENT_TOKEN") or ""
@@ -237,9 +366,13 @@ class LatchDriver:
 
     # ---- driver surface ------------------------------------------------
 
-    def _text(self, result: dict) -> str:
+    @staticmethod
+    def _text_of(result: dict) -> str:
         parts = [c.get("text", "") for c in result.get("content", []) if c.get("type") == "text"]
         return "\n".join(parts)
+
+    def _text(self, result: dict) -> str:
+        return self._text_of(result)
 
     def run_command(self, argv: list[str]) -> str:
         result = self._call("plow_run_command", {"argv": argv})
@@ -247,6 +380,23 @@ class LatchDriver:
 
     def run_applescript(self, src: str) -> str:
         return self.run_command(["osascript", "-e", src])
+
+    @staticmethod
+    def _envelope(result: dict) -> dict:
+        """Parse a plow_run_applescript / plow_get_result payload.
+
+        The tool answers a JSON envelope ({status, exit_code, output, handle}),
+        but a bare-text answer is treated as finished output rather than
+        crashing the whole action on a JSONDecodeError.
+        """
+        text = LatchDriver._text_of(result)
+        if not text.strip():
+            return {}
+        try:
+            inner = json.loads(text)
+        except json.JSONDecodeError:
+            return {"output": text}
+        return inner if isinstance(inner, dict) else {"output": text}
 
     def _applescript(self, src: str) -> str:
         """Run AppleScript through Latch's dedicated plow_run_applescript tool.
@@ -258,36 +408,44 @@ class LatchDriver:
         owner was shown an approval card) is polled via plow_get_result.
         """
         result = self._call("plow_run_applescript", {"app": "System Events", "script": src, "wait_ms": 15000})
-        inner = json.loads(self._text(result))
+        inner = self._envelope(result)
         if inner.get("status") == "pending":
             handle = inner.get("handle") or ""
             for _ in range(30):
                 time.sleep(2)
                 poll = self._call("plow_get_result", {"handle": handle})
-                inner = json.loads(self._text(poll))
+                inner = self._envelope(poll)
                 if inner.get("status") != "pending":
                     break
         if inner.get("exit_code") not in (0, None):
             raise DriverError("host_gate", inner.get("output", "applescript failed"))
         return inner.get("output", "")
 
+    def _read(self, path: str) -> dict:
+        return self._envelope(self._call("plow_read_file", {"path": path}))
+
     def read_file(self, path: str) -> bytes:
-        result = self._call("plow_read_file", {"path": path})
-        raw = result.get("bytes")
-        if isinstance(raw, bytes):
-            return raw
-        if isinstance(raw, str) and raw:
-            try:
-                return base64.b64decode(raw, validate=True)
-            except Exception:
-                return raw.encode("utf-8")
-        text = self._text(result)
-        if not text:
+        """Read a file from the Mac, binary included.
+
+        plow_read_file inlines `content` for a text file but answers only a byte
+        count for a binary one — it never hands back raw bytes. So a binary read
+        is staged: the Mac base64-encodes the file next to itself, and that text
+        copy is what crosses the wire. Without this every frame arrived as the
+        JSON summary instead of an image.
+        """
+        env = self._read(path)
+        content = env.get("content")
+        if isinstance(content, str):
+            return content.encode("utf-8")
+        if not env.get("bytes"):
             return b""
+        staged = path + ".b64"
+        self._applescript('do shell script "base64 -i %s -o %s"' % (path, staged))
+        text = self._read(staged).get("content") or ""
         try:
-            return base64.b64decode(text, validate=True)
-        except Exception:
-            return text.encode("utf-8")
+            return base64.b64decode(text, validate=False)
+        except Exception as exc:
+            raise DriverError("read_failed", f"could not decode {path}: {exc}") from exc
 
     def _window(self) -> tuple[str | None, str, tuple[float, float], tuple[float, float]]:
         out = self._applescript(window_script())
@@ -306,41 +464,289 @@ class LatchDriver:
         except Exception:
             return False
 
+    def _focus(self) -> None:
+        """Bring the mirror window frontmost before sending keystrokes.
+
+        `keystroke` goes to whatever app is frontmost on the Mac, not to a
+        window we name — so without this an open_app/type_text would be typed
+        into whatever the owner happened to have in front.
+        """
+        src = (
+            'tell application "System Events" to set frontmost of '
+            'application process "iPhone Mirroring" to true'
+        )
+        self.scripts.append(src)
+        self._applescript(src)
+
     def open_app(self, app: str) -> None:
         src = open_app_script(app)
         self.commands.append(("open_app", app))
         self.scripts.append(src)
-        self.run_applescript(src)
+        self._focus()
+        self._applescript(src)
 
     def screenshot(self) -> bytes:
-        # No window id available through the sandboxed AppleScript path, so the
-        # capture is whole-screen; the canvas crops nothing — the frame shows
-        # the mirrored iPhone wherever the window sits on the display.
-        path = "/tmp/phoneflow.png"
-        self.run_command(["screencapture", "-x", path])
+        # plow_run_command runs inside Latch's seatbelt sandbox, where
+        # screencapture never reaches the window server: it dies with exit -1
+        # and writes no file, so the follow-up read fails ENOENT. The dedicated
+        # AppleScript tool runs outside that sandbox, so the capture is shelled
+        # out from there and macOS attributes the Screen Recording grant to
+        # Latch itself.
+        #
+        # No window id is available on this path, so the capture is whole-screen;
+        # the canvas crops nothing — the frame shows the mirrored iPhone wherever
+        # the window sits on the display.
+        path = FRAME_PATH
+        self._applescript('do shell script "screencapture -x %s"' % path)
         return self.read_file(path)
 
+    def _ensure_ocr(self) -> None:
+        """Compile the Vision OCR helper on the Mac if it is not there yet.
+
+        Costs ~60s once per Mac; afterwards the binary is reused, so this is a
+        no-op on every later call. Raises DriverError(ocr_unavailable) rather
+        than host_gate so a missing toolchain reads differently from a denial.
+        """
+        if self._ocr_ready:
+            return
+        for binary, source, code in (
+            (OCR_BIN, OCR_DIR + "/pf_ocr.swift", OCR_SWIFT),
+            (DRAG_BIN, OCR_DIR + "/pf_drag.swift", DRAG_SWIFT),
+        ):
+            probe = self._applescript(
+                'do shell script "test -x %s && echo yes || echo no"' % binary
+            ).strip()
+            if probe == "yes":
+                continue
+            self._call("plow_write_file", {"path": source.replace("$HOME", os.path.expanduser("~")),
+                                           "content": code})
+            try:
+                self._applescript(
+                    'do shell script "mkdir -p %s && xcrun swiftc -O -o %s %s"'
+                    % (OCR_DIR, binary, source)
+                )
+            except DriverError as exc:
+                raise DriverError("ocr_unavailable", f"could not build {binary}: {exc}") from exc
+        self._ocr_ready = True
+
+    OCR_UPSCALE = 3
+
+    def _ocr_lines(self, frame: bytes) -> list[dict]:
+        """Text inside the mirror window, as [{"t","x","y"}] in screen points.
+
+        The window is only a few hundred points wide, so the whole iPhone is
+        rendered small and the tab-bar labels come out around 8pt — Vision reads
+        the video titles fine and misses the navigation entirely, which leaves an
+        agent unable to move between tabs. So the window is cropped out of the
+        capture and upscaled before recognition, and the normalised boxes that
+        come back are mapped onto the window's own coordinates.
+        """
+        key = hashlib.sha256(frame).hexdigest() if frame else ""
+        if key and key == self._ocr_key:
+            return self._ocr_lines_cache
+        self._ensure_ocr()
+        _, _, pos, size = self._window()
+        scale = self._pixel_scale()
+        crop = FRAME_PATH.replace(".png", "_win.png")
+        big = max(size) * scale * self.OCR_UPSCALE
+        self._applescript(
+            'do shell script "sips -c %d %d --cropOffset %d %d %s --out %s >/dev/null '
+            '&& sips -Z %d %s >/dev/null"'
+            % (int(size[1] * scale), int(size[0] * scale),
+               int(pos[1] * scale), int(pos[0] * scale), FRAME_PATH, crop,
+               int(big), crop)
+        )
+        out = self._applescript('do shell script "%s %s"' % (OCR_BIN, crop))
+        try:
+            data = json.loads(out) or {}
+        except json.JSONDecodeError:
+            data = {}
+        lines = []
+        for l in data.get("lines") or []:
+            lines.append({
+                "t": l.get("t", ""),
+                # Normalised against the crop, and the crop *is* the window, so
+                # the fraction maps straight onto the window's own rectangle.
+                "x": pos[0] + float(l.get("nx", 0)) * size[0],
+                "y": pos[1] + float(l.get("ny", 0)) * size[1],
+            })
+        self._ocr_key, self._ocr_lines_cache = key, lines
+        self._crop_geom = {
+            "pos": pos, "size": size, "titlebar": self.titlebar_px,
+            "px_w": int(data.get("w") or 0), "px_h": int(data.get("h") or 0),
+        }
+        return lines
+
+    def window_crop(self, frame: bytes) -> tuple[bytes, dict]:
+        """The mirror window alone, upscaled, as JPEG — plus how to map it back.
+
+        This is the same crop the OCR pass reads, handed to a vision model that
+        can locate *icons*, which OCR by definition cannot. The geometry lets the
+        caller turn a box in crop pixels into a screen point:
+        x = pos.x + cx / px_w * size.w, and likewise for y.
+        """
+        self._ocr_lines(frame)  # ensures the crop exists and geometry is fresh
+        crop = FRAME_PATH.replace(".png", "_win.png")
+        jpg = FRAME_PATH.replace(".png", "_win.jpg")
+        self._applescript(
+            'do shell script "sips -s format jpeg -s formatOptions 70 %s --out %s >/dev/null"'
+            % (crop, jpg)
+        )
+        return self.read_file(jpg), dict(self._crop_geom)
+
+    def _pixel_scale(self) -> float:
+        """Capture pixels per screen point (1 on a plain display, 2 on Retina)."""
+        if self._scale:
+            return self._scale
+        out = self._applescript('do shell script "%s %s"' % (OCR_BIN, FRAME_PATH))
+        try:
+            d = json.loads(out)
+            self._scale = float(d["w"]) / float(d["sw"]) if d.get("sw") else 1.0
+        except Exception:
+            self._scale = 1.0
+        return self._scale
+
     def ocr(self, frame: bytes) -> str:
-        # macOS has no ocr CLI and Hermes-side vision is out of scope; see docstring.
-        return ""
+        return "\n".join(l.get("t", "") for l in self._ocr_lines(frame))
+
+    def ocr_items(self, frame: bytes) -> list[dict]:
+        """Recognised text inside the mirror window, with screen coordinates.
+
+        Bounded by construction — _ocr_lines only ever looks at the cropped
+        window — so nothing an agent can choose from here sits on the desktop.
+        """
+        return self._ocr_lines(frame)
+
+    def _bounds_check(self, x: float, y: float) -> None:
+        _, _, pos, size = self._window()
+        # The band above the phone is the Mac's title bar and the Mirroring
+        # toolbar: a click there closes or resizes the window, never the phone.
+        top = pos[1] + self.titlebar_px
+        if not (pos[0] <= x <= pos[0] + size[0] and top <= y <= pos[1] + size[1]):
+            raise DriverError("tap_out_of_bounds", f"({x},{y}) is outside the phone area")
+
+    def tap_point(self, x: float, y: float) -> None:
+        """Click one absolute screen point, refusing anything off the phone."""
+        self._bounds_check(x, y)
+        # Two things were swallowing taps. `click at` posts no real mouse event,
+        # so it never reached the phone at all; and once a real CGEvent click was
+        # used, an unfocused mirror window ate the first click to raise itself.
+        # Focus first, then click, or every tap is spent on the window instead of
+        # the phone.
+        self._ensure_ocr()
+        self._focus()
+        src = 'do shell script "%s %d %d"' % (DRAG_BIN, int(x), int(y))
+        self.commands.append(("tap_point", x, y))
+        self.scripts.append(src)
+        self._applescript(src)
+
+    def frame_for_model(self, max_px: int = 900) -> bytes:
+        """A downscaled copy of the last capture, for sending to a vision model.
+
+        The raw capture is several megabytes of Retina PNG; sending that every
+        step would dominate both latency and token cost, so the resize happens
+        on the Mac and only the small copy crosses the wire.
+        """
+        # JPEG, not PNG: the frame travels as base64 text (see read_file), and a
+        # PNG screenshot costs ~10x the bytes for no benefit to a vision model.
+        small = FRAME_PATH.replace(".png", "_small.jpg")
+        self._applescript(
+            'do shell script "sips -s format jpeg -s formatOptions 70 -Z %d %s --out %s >/dev/null"'
+            % (max_px, FRAME_PATH, small)
+        )
+        return self.read_file(small)
 
     def tap(self, x: float, y: float) -> None:
         _, _, pos, size = self._window()
         px = pos[0] + x * size[0]
         py = pos[1] + self.titlebar_px + y * max(size[1] - self.titlebar_px, 1)
-        src = click_script(int(px), int(py), titlebar_px=self.titlebar_px)
         self.commands.append(("tap", x, y))
+        self.tap_point(px, py)
+
+    def long_press(self, x: float, y: float, hold_ms: int = 800) -> None:
+        """Press and hold — how iOS opens context menus."""
+        self._bounds_check(x, y)
+        self._ensure_ocr()
+        self._focus()
+        src = 'do shell script "%s %d %d %d"' % (DRAG_BIN, int(x), int(y), hold_ms)
+        self.commands.append(("long_press", x, y))
         self.scripts.append(src)
-        self.run_applescript(src)
+        self._applescript(src)
+
+    def swipe_from(self, x: float, y: float, direction: str, distance: float = 0.5) -> None:
+        """Swipe starting at one point on screen rather than through the centre.
+
+        A centre-anchored swipe cannot scroll anything that is not in the middle
+        of the screen — a row of chips under the header, a horizontal carousel —
+        because the gesture simply never touches it. Anchoring the start at a
+        recognised item is what makes those regions reachable.
+        """
+        _, _, pos, size = self._window()
+        span = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}[direction]
+        dx = span[0] * size[0] * distance
+        dy = span[1] * size[1] * distance
+        x2 = min(max(x + dx, pos[0] + 4), pos[0] + size[0] - 4)
+        y2 = min(max(y + dy, pos[1] + 4), pos[1] + size[1] - 4)
+        self.commands.append(("swipe_from", x, y, direction))
+        self._ensure_ocr()
+        self._focus()
+        src = 'do shell script "%s %d %d %d %d 320"' % (DRAG_BIN, int(x), int(y), int(x2), int(y2))
+        self.scripts.append(src)
+        self._applescript(src)
+
+    def system_key(self, button: str) -> None:
+        """Home / App Switcher / Spotlight, via iPhone Mirroring's own shortcuts.
+
+        Cmd-1, Cmd-2 and Cmd-3 (key codes 18/19/20). `back` is not one of them —
+        iOS has no back button, so it is the left-edge swipe below.
+        """
+        codes = {"home": 18, "app_switcher": 19, "spotlight": 20}
+        if button not in codes:
+            raise DriverError("unknown_button", f"no such system button: {button!r}")
+        self.commands.append(("system_key", button))
+        self._focus()
+        src = 'tell application "System Events" to key code %d using command down' % codes[button]
+        self.scripts.append(src)
+        self._applescript(src)
+
+    def back(self) -> None:
+        """The iOS back gesture: a swipe in from the left edge.
+
+        There is no back shortcut in iPhone Mirroring, and without this the agent
+        has no way out of a screen it opened — it has to improvise, which is how
+        a run gets stuck.
+        """
+        _, _, pos, size = self._window()
+        y = pos[1] + size[1] * 0.5
+        self.commands.append(("back",))
+        self._ensure_ocr()
+        self._focus()
+        src = 'do shell script "%s %d %d %d %d 300"' % (
+            DRAG_BIN, int(pos[0] + 3), int(y), int(pos[0] + size[0] * 0.6), int(y))
+        self.scripts.append(src)
+        self._applescript(src)
 
     def tap_label(self, label: str) -> None:
-        # No OCR on the real path (see module docstring): locate-by-text cannot
-        # resolve, so fail with the last frame attached for the owner.
         self.commands.append(("tap_label", label))
         frame = self.screenshot()
-        err = DriverError("element_not_found", f"label {label!r} not found: no OCR on the latch path")
-        err.frame = frame
-        raise err
+        hits = [l for l in self._ocr_lines(frame) if label.lower() in (l.get("t") or "").lower()]
+        if not hits:
+            err = DriverError("element_not_found", f"label {label!r} not on screen")
+            err.frame = frame
+            raise err
+        # The capture is whole-screen, so a match on the desktop behind the
+        # mirror would otherwise send a click outside the phone entirely.
+        _, _, pos, size = self._window()
+        inside = [
+            l for l in hits
+            if pos[0] <= l.get("x", -1) <= pos[0] + size[0]
+            and pos[1] <= l.get("y", -1) <= pos[1] + size[1]
+        ]
+        if not inside:
+            err = DriverError("element_not_found", f"label {label!r} found only outside the mirror window")
+            err.frame = frame
+            raise err
+        self.tap_point(inside[0]["x"], inside[0]["y"])
 
     def swipe(self, frm: dict, to: dict, duration_ms: int) -> None:
         _, _, pos, size = self._window()
@@ -350,10 +756,16 @@ class LatchDriver:
 
         x1, y1 = _abs(frm)
         x2, y2 = _abs(to)
-        src = drag_script(int(x1), int(y1), int(x2), int(y2), duration_ms)
         self.commands.append(("swipe", frm, to, duration_ms))
+        self._focus()  # an unfocused window eats the press, same as taps
+        # AppleScript-ObjC cannot hand a CGEventRef to CGEventPost (it fails to
+        # coerce to {__CGEvent=}), so the inline drag script silently exited 1
+        # and every scroll was a no-op. The Swift helper does the real drag.
+        self._ensure_ocr()
+        src = 'do shell script "%s %d %d %d %d %d"' % (
+            DRAG_BIN, int(x1), int(y1), int(x2), int(y2), max(duration_ms, 200))
         self.scripts.append(src)
-        self.run_applescript(src)
+        self._applescript(src)
 
     def type_text(self, text: str) -> None:
         self.commands.append(("type_text", text))
@@ -363,7 +775,8 @@ tell application "System Events"
 end tell
 '''
         self.scripts.append(src)
-        self.run_applescript(src)
+        self._focus()
+        self._applescript(src)
 
     def vault_fill(self, vault_item_id: str) -> str:
         # spec §11: the fill is manual; the owner completes the Mac auth prompt
