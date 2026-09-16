@@ -66,6 +66,55 @@ curl -sf http://suedpc.local:8788/api/health
 
 If `/api/health` reports `latch: "down"`, stop and open Latch first.
 
+## Screen reading (OCR)
+
+`phone.tap` by label, `flow.if`, and every `agent.task` need to know what is on
+the phone. That comes from macOS Vision, run on the Mac: `mac/pf_ocr.swift` is
+compiled once to `~/.phoneflow/pf_ocr` and returns each recognised line with its
+screen coordinates. The driver builds it on first use, so no manual step is
+needed — the first call just costs about a minute while `swiftc` runs.
+
+Two constraints worth knowing, because they shaped the design:
+
+- **Latch never returns binary file content.** `plow_read_file` inlines text but
+  answers only a byte count for a PNG, so the driver has the Mac write a base64
+  copy and reads that instead. Frames are JPEG for the same reason — size is
+  real cost on this path.
+- **`screencapture` cannot run under `plow_run_command`.** That path is
+  sandboxed and the capture dies with exit -1. It goes through
+  `plow_run_applescript` instead, which runs outside the sandbox. Latch itself
+  needs macOS **Screen Recording** permission, and must be restarted after it is
+  granted.
+
+## Goal-driven nodes (`agent.task`)
+
+A graph node says *what* to tap. An `agent.task` node says only what you want,
+and a vision model works out the taps from what is actually on screen:
+
+```json
+{"id": "n3", "type": "agent.task",
+ "params": {"goal": "Open the trending tab and read the first 3 video titles.",
+            "maxSteps": 18}}
+```
+
+Each step sends the model a downscaled frame plus a **numbered list** of the
+recognised text; the model replies with an item number, never a coordinate.
+Vision owns precision, the model owns judgement. The list only ever contains
+text found *inside* the mirror window, so no choice the model can make is able
+to click the owner's desktop, and `tap_point` refuses out-of-bounds points
+anyway.
+
+Configure the model through the environment (any OpenAI-compatible endpoint):
+
+```sh
+PHONEFLOW_LLM_API_KEY=...                      # required for agent.task only
+PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # default
+PHONEFLOW_AGENT_MODEL=kimi-k3                  # must support vision + tools
+```
+
+Graph-only workflows run without any of these. Try `wf_youtube_trending` first —
+YouTube's trending tab is stable enough to tell a real failure from a flaky one.
+
 ## Before a real chore: fill `wf_app_lookup`
 
 The bundled workflow [`workflows/wf_app_lookup.json`](workflows/wf_app_lookup.json)

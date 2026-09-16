@@ -8,6 +8,11 @@ services:
       PHONEFLOW_DRIVER: latch
       PLOW_MCP_URL: ${PLOW_MCP_URL:-}
       PLOW_AGENT_TOKEN: ${PLOW_AGENT_TOKEN:-}
+      # agent.task nodes need this; graph-only workflows run without it.
+      PHONEFLOW_LLM_API_KEY: ${PHONEFLOW_LLM_API_KEY:-}
+      PHONEFLOW_LLM_BASE_URL: ${PHONEFLOW_LLM_BASE_URL:-https://ollama.com/v1}
+      PHONEFLOW_AGENT_MODEL: ${PHONEFLOW_AGENT_MODEL:-glm-5.3-flash}
+      PHONEFLOW_GROUNDER_MODEL: ${PHONEFLOW_GROUNDER_MODEL:-glm-5.3-flash}
     volumes:
       - ./plow-credentials:/var/lib/plow/credentials.host:ro
       - agent-home:/var/lib/hermes

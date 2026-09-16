@@ -6,10 +6,12 @@ COPY pf_mirror/ ./pf_mirror/
 COPY web/dist/ ./web/
 COPY workflows/ ./workflows/
 
-RUN pip install --no-cache-dir pydantic pydantic-settings python-dotenv pyyaml \
+RUN pip install --no-cache-dir pydantic pydantic-settings python-dotenv pyyaml openai \
  && chmod -R 0755 /opt/phoneflow
 
 ENV PYTHONPATH=/opt/phoneflow \
+    PHONEFLOW_AGENT_MODEL=glm-5.3-flash \
+    PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1 \
     PHONEFLOW_HOME=/data \
     PHONEFLOW_WEB=/opt/phoneflow/web \
     PHONEFLOW_PORT=8787 \
