@@ -26,6 +26,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -43,8 +44,9 @@ def window_script() -> str:
     # the CGWindowID lookup in screenshot() instead when needed.
     return (
         'tell application "System Events" to get {name, position, size} of '
-        f'window 1 of (first application process whose name is "{TITLES[0]}")'
+        'window 1 of (application process "iPhone Mirroring")'
     )
+
 
 
 
@@ -246,6 +248,29 @@ class LatchDriver:
     def run_applescript(self, src: str) -> str:
         return self.run_command(["osascript", "-e", src])
 
+    def _applescript(self, src: str) -> str:
+        """Run AppleScript through Latch's dedicated plow_run_applescript tool.
+
+        The generic plow_run_command→osascript path runs inside Latch's seatbelt
+        sandbox and answers -600 "Application isn't running" for System Events
+        queries; the dedicated tool does not. Returns the script's output text,
+        raising DriverError(host_gate) on a nonzero exit. A pending result (the
+        owner was shown an approval card) is polled via plow_get_result.
+        """
+        result = self._call("plow_run_applescript", {"app": "System Events", "script": src, "wait_ms": 15000})
+        inner = json.loads(self._text(result))
+        if inner.get("status") == "pending":
+            handle = inner.get("handle") or ""
+            for _ in range(30):
+                time.sleep(2)
+                poll = self._call("plow_get_result", {"handle": handle})
+                inner = json.loads(self._text(poll))
+                if inner.get("status") != "pending":
+                    break
+        if inner.get("exit_code") not in (0, None):
+            raise DriverError("host_gate", inner.get("output", "applescript failed"))
+        return inner.get("output", "")
+
     def read_file(self, path: str) -> bytes:
         result = self._call("plow_read_file", {"path": path})
         raw = result.get("bytes")
@@ -265,7 +290,7 @@ class LatchDriver:
             return text.encode("utf-8")
 
     def _window(self) -> tuple[str | None, str, tuple[float, float], tuple[float, float]]:
-        out = self.run_applescript(window_script())
+        out = self._applescript(window_script())
         nums = re.findall(r"-?\d+(?:\.\d+)?", out)
         if "iPhone Mirroring" not in out and "Espelhamento" not in out or len(nums) < 4:
             raise DriverError("mirror_window_missing", f"no mirror window: {out!r}")
