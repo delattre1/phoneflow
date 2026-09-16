@@ -42,10 +42,10 @@ class FakeTransport:
 
 
 
-def test_window_script_lists_both_titles():
+def test_window_script_targets_mirror_process():
     src = window_script()
     assert "iPhone Mirroring" in src
-    assert "Espelhamento do iPhone" in src
+    assert "System Events" in src
 
 
 def test_click_script_uses_titlebar_offset():

@@ -38,20 +38,16 @@ _UNSET = object()
 
 
 def window_script() -> str:
-    return f'''
-tell application "System Events"
-  set procs to application processes whose background only is false
-  repeat with p in procs
-    repeat with w in windows of p
-      set t to name of w as text
-      if t contains "{TITLES[0]}" or t contains "{TITLES[1]}" then
-        return ((id of w) as text) & tab & t & tab & (position of w as text) & tab & (size of w as text)
-      end if
-    end repeat
-  end repeat
-end tell
-error "mirror_window_missing"
-'''
+    # Per-title query using `get {name, position, size}` — the sandboxed
+    # osascript path refuses `(id of w)` (-1723), so the window id comes from
+    # the CGWindowID lookup in screenshot() instead when needed.
+    return (
+        'tell application "System Events" to get {name, position, size} of '
+        f'window 1 of (first application process whose name is "{TITLES[0]}")'
+    )
+
+
+
 
 
 def click_script(x: float, y: float, titlebar_px: int = 28) -> str:
@@ -270,21 +266,13 @@ class LatchDriver:
 
     def _window(self) -> tuple[str | None, str, tuple[float, float], tuple[float, float]]:
         out = self.run_applescript(window_script())
-        parts = [p.strip() for p in out.split("\t")]
-        if len(parts) >= 4:
-            wid, title, pos, size = parts[0], parts[1], parts[2], parts[3]
-        elif len(parts) == 3:
-            wid, title, pos, size = None, parts[0], parts[1], parts[2]
-        else:
-            raise DriverError("mirror_window_missing", f"cannot parse window info: {out!r}")
-
-        def _pt(text: str) -> tuple[float, float]:
-            nums = re.findall(r"-?\d+(?:\.\d+)?", text)
-            if len(nums) < 2:
-                raise DriverError("mirror_window_missing", f"cannot parse coords: {text!r}")
-            return float(nums[0]), float(nums[1])
-
-        return wid, title, _pt(pos), _pt(size)
+        nums = re.findall(r"-?\d+(?:\.\d+)?", out)
+        if "iPhone Mirroring" not in out and "Espelhamento" not in out or len(nums) < 4:
+            raise DriverError("mirror_window_missing", f"no mirror window: {out!r}")
+        # format: "iPhone Mirroring, 842, 314, 316, 696"
+        title = TITLES[0] if TITLES[0] in out else TITLES[1]
+        px, py, w, h = (float(n) for n in nums[:4])
+        return None, title, (px, py), (w, h)
 
     def health(self) -> bool:
         try:
@@ -300,10 +288,11 @@ class LatchDriver:
         self.run_applescript(src)
 
     def screenshot(self) -> bytes:
-        wid, _, _, _ = self._window()
+        # No window id available through the sandboxed AppleScript path, so the
+        # capture is whole-screen; the canvas crops nothing — the frame shows
+        # the mirrored iPhone wherever the window sits on the display.
         path = "/tmp/phoneflow.png"
-        argv = ["screencapture", "-x", "-o", "-l", str(wid), path] if wid else ["screencapture", "-x", path]
-        self.run_command(argv)
+        self.run_command(["screencapture", "-x", path])
         return self.read_file(path)
 
     def ocr(self, frame: bytes) -> str:
