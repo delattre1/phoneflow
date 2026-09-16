@@ -6,6 +6,8 @@ services:
     environment:
       AGENT_ID: phoneflow
       PHONEFLOW_DRIVER: latch
+      PLOW_MCP_URL: ${PLOW_MCP_URL:-}
+      PLOW_AGENT_TOKEN: ${PLOW_AGENT_TOKEN:-}
     volumes:
       - ./plow-credentials:/var/lib/plow/credentials.host:ro
       - agent-home:/var/lib/hermes
