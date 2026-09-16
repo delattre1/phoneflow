@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 import time
 import uuid
 from datetime import datetime, timezone
@@ -27,9 +28,12 @@ def _now() -> str:
 
 
 class Interpreter:
-    def __init__(self, driver, retry_wait: float = 0.8):
+    def __init__(self, driver, retry_wait: float = 0.8, agent_kwargs: dict | None = None):
         self.driver = driver
         self.retry_wait = retry_wait
+        # agent.task builds its loop lazily; tests inject a fake client here.
+        self._agent_kwargs = agent_kwargs
+        self.agent_results: list[dict] = []
         self.frames: list[bytes] = []
         self.events: list[dict] = []
         self.run: dict | None = None
@@ -152,6 +156,31 @@ class Interpreter:
             if ms > 0:
                 time.sleep(ms / 1000)
             return self._next()
+        if ntype == "agent.task":
+            from pf_api.agent import AgentLoop
+
+            loop = AgentLoop(self.driver, **(self._agent_kwargs or {}))
+            budget = params.get("maxSteps")
+            if budget:
+                loop.max_steps = int(budget)
+            result = loop.run(params["goal"])
+            self.agent_results.append(result)
+            # Durable trail: the loop's own steps live in memory, so without
+            # this the run record would show only "the node ran" and the whole
+            # reason a goal failed would be unrecoverable after a restart.
+            for entry in result.get("steps", []):
+                detail = json.dumps(entry["args"], ensure_ascii=False)[:180]
+                self._event(node["id"], f"agent.{entry['action']}:{detail}")
+            self._event(node["id"], f"agent.{result['status']}:{result.get('message','')[:300]}")
+            if result["status"] == "succeeded":
+                return self._next()
+            if result["status"] == "given_up":
+                # A deliberate, reported stop — but the goal was not met, and a
+                # run that ends "succeeded" while the agent explains why it could
+                # not finish is the kind of report nobody can trust. The reason
+                # is already in the event trail above.
+                return self._fail("agent_gave_up")
+            return self._fail("agent_failed")
         if ntype == "flow.if":
             handle = "true" if self._matches(params["match"]) else "false"
             return self._next(handle)

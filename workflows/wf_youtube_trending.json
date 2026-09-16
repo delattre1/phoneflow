@@ -1,0 +1,16 @@
+{
+  "id": "wf_youtube_trending",
+  "name": "YouTube: o que esta em alta",
+  "version": 1,
+  "nodes": [
+    {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+    {"id": "n2", "type": "phone.openApp", "position": {"x": 0, "y": 1}, "params": {"app": "YouTube"}},
+    {"id": "n3", "type": "agent.task", "position": {"x": 0, "y": 2},
+     "params": {"goal": "No app do YouTube, navegue ate a aba de videos em alta (Em alta / Trending) e descubra os titulos dos 3 primeiros videos listados. Quando tiver os 3 titulos, chame done com eles no resumo.",
+                "maxSteps": 18}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "n1", "target": "n2"},
+    {"id": "e2", "source": "n2", "target": "n3"}
+  ]
+}

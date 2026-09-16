@@ -9,6 +9,7 @@ NODE_TYPES = frozenset({
     "phone.type", "phone.wait",
     "flow.if", "flow.confirm", "flow.stop",
     "auth.vaultUnlock",
+    "agent.task",
 })
 TRIGGERS = frozenset({"trigger.manual", "trigger.chat"})
 ID_RE = re.compile(r"^wf_[a-z0-9_]{1,64}$")
@@ -27,6 +28,7 @@ PARAM_KEYS = {
     "flow.confirm": frozenset({"prompt"}),
     "flow.stop": frozenset({"reason"}),
     "auth.vaultUnlock": frozenset({"vaultItemId"}),
+    "agent.task": frozenset({"goal", "maxSteps"}),
 }
 REQUIRED = {
     "phone.openApp": ("app",),
@@ -36,6 +38,7 @@ REQUIRED = {
     "flow.if": ("match",),
     "flow.confirm": ("prompt",),
     "auth.vaultUnlock": ("vaultItemId",),
+    "agent.task": ("goal",),
 }
 
 
