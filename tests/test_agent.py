@@ -386,3 +386,31 @@ def test_planner_and_grounder_default_to_different_models():
     # fast model measured 76pt off against a 44pt tap target.
     import pf_api.agent as a
     assert a.MODEL != a.GROUNDER_MODEL
+
+
+def test_mark_draws_numbers_and_falls_back_on_bad_frame():
+    from pf_api.agent import AgentLoop
+    geom = {"pos": (100, 200), "size": (316, 696), "titlebar": 28}
+    items = [{"t": "Home", "x": 130, "y": 850}, {"t": "[icon] search", "x": 380, "y": 260}]
+    try:
+        import io
+        from PIL import Image
+    except ImportError:
+        return
+    buf = io.BytesIO()
+    Image.new("RGB", (316, 696), "white").save(buf, format="JPEG")
+    plain = buf.getvalue()
+    marked = AgentLoop._mark(plain, items, geom)
+    assert marked != plain
+    im = Image.open(io.BytesIO(marked))
+    # A red tag landed near where item 1 sits (bottom-left) and item 2 (top-right).
+    px = im.load()
+    def red_near(x, y, r=30):
+        return any(px[i, j][0] > 180 and px[i, j][1] < 80
+                   for i in range(max(0, x - r), min(im.width, x + r))
+                   for j in range(max(0, y - r), min(im.height, y + r)))
+    assert red_near(30, 650) and red_near(280, 60)
+    assert not red_near(158, 348)
+    # Garbage in, original out — the marks never cost the turn.
+    assert AgentLoop._mark(b"not a jpeg", items, geom) == b"not a jpeg"
+    assert AgentLoop._mark(plain, items, None) == plain

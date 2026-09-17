@@ -248,15 +248,15 @@ def test_latch_driver_ocr_caches_on_frame_bytes():
     assert runs() == first + 1
 
 
-def test_latch_driver_swipe_uses_the_drag_binary_not_inline_applescript():
-    # AppleScript-ObjC cannot pass a CGEventRef to CGEventPost, so the inline
-    # drag script exited 1 and every scroll was a silent no-op.
+def test_latch_driver_swipe_uses_the_trackpad_scroll_helper():
+    # A pressed-mouse drag grabs videos and selects text; scrolling goes through
+    # pf_scroll, which posts a real trackpad scroll gesture with phase+momentum.
     handler = _ocr_handler([])
     drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
     drv.health()
     drv.swipe({"x": 0.5, "y": 0.75}, {"x": 0.5, "y": 0.25}, 400)
     sent = drv.scripts[-1]
-    assert "pf_drag" in sent
+    assert "pf_scroll" in sent
     assert "CGEventPost" not in sent
 
 

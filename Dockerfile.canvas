@@ -5,8 +5,9 @@ COPY pf_api/ ./pf_api/
 COPY pf_mirror/ ./pf_mirror/
 COPY web/dist/ ./web/
 COPY workflows/ ./workflows/
+COPY app_hints/ ./app_hints/
 
-RUN pip install --no-cache-dir pydantic pydantic-settings python-dotenv pyyaml openai \
+RUN pip install --no-cache-dir pydantic pydantic-settings python-dotenv pyyaml openai pillow \
  && chmod -R 0755 /opt/phoneflow
 
 ENV PYTHONPATH=/opt/phoneflow \

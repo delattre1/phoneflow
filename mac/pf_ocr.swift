@@ -31,15 +31,50 @@ req.recognitionLanguages = ["pt-BR", "en-US"]
 try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
 
 var out: [String] = []
-for obs in (req.results ?? []) {
-    guard let top = obs.topCandidates(1).first else { continue }
-    let b = obs.boundingBox
-    let cx = Double(b.origin.x) + Double(b.width) / 2.0
-    let cy = 1.0 - (Double(b.origin.y) + Double(b.height) / 2.0)
-    let esc = top.string.data(using: .utf8).flatMap {
+func emit(_ text: String, _ box: CGRect) {
+    let cx = Double(box.origin.x) + Double(box.width) / 2.0
+    let cy = 1.0 - (Double(box.origin.y) + Double(box.height) / 2.0)
+    let esc = text.data(using: .utf8).flatMap {
         String(data: try! JSONSerialization.data(withJSONObject: [String(data: $0, encoding: .utf8)!]), encoding: .utf8)
     } ?? "[\"\"]"
     let t = String(esc.dropFirst().dropLast())
     out.append("{\"t\":\(t),\"nx\":\(cx),\"ny\":\(cy)}")
+}
+// Vision returns one observation per LINE, so a tab bar ("Home  Shorts  You")
+// or a pair of buttons ("Cancel   OK") came back as one item whose centre sat
+// between the targets — the agent asked for "Shorts" and tapped the gap. Each
+// line is split at gaps clearly wider than a space (a segment is a run of words
+// whose spacing is normal), so every button on a row gets its own centre.
+for obs in (req.results ?? []) {
+    guard let top = obs.topCandidates(1).first else { continue }
+    let str = top.string
+    var words: [(String, CGRect)] = []
+    var i = str.startIndex
+    while i < str.endIndex {
+        while i < str.endIndex, str[i].isWhitespace { i = str.index(after: i) }
+        if i >= str.endIndex { break }
+        var j = i
+        while j < str.endIndex, !str[j].isWhitespace { j = str.index(after: j) }
+        if let r = try? top.boundingBox(for: i..<j) {
+            words.append((String(str[i..<j]), r.boundingBox))
+        }
+        i = j
+    }
+    if words.count < 2 { emit(str, obs.boundingBox); continue }
+    // A typical space is about a third of the line height; anything past a
+    // full line height is a gap between separate controls.
+    let gapLimit = Double(obs.boundingBox.height) * 1.0
+    var seg: [(String, CGRect)] = [words[0]]
+    func flush() {
+        let text = seg.map { $0.0 }.joined(separator: " ")
+        let x0 = seg.map { Double($0.1.minX) }.min()!, x1 = seg.map { Double($0.1.maxX) }.max()!
+        let y0 = seg.map { Double($0.1.minY) }.min()!, y1 = seg.map { Double($0.1.maxY) }.max()!
+        emit(text, CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+    }
+    for w in words.dropFirst() {
+        let gap = Double(w.1.minX) - Double(seg.last!.1.maxX)
+        if gap > gapLimit { flush(); seg = [w] } else { seg.append(w) }
+    }
+    flush()
 }
 print("{\"w\":\(Int(sw)),\"h\":\(Int(sh)),\"sw\":\(Int(scr.width)),\"sh\":\(Int(scr.height)),\"lines\":[\(out.joined(separator: ","))]}")

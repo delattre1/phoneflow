@@ -25,6 +25,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from pf_api.driver import DriverError
 from pf_api.schema import PAY_TAP_RE
@@ -70,31 +71,81 @@ GROUNDER_MAX_TOKENS = int(os.environ.get("PHONEFLOW_GROUNDER_MAX_TOKENS", "16000
 # space is inferred per call from OCR anchors instead of configured; this is
 # only the fallback for when no anchor comes back.
 GROUNDER_SPACE = os.environ.get("PHONEFLOW_GROUNDER_SPACE", "1000")
+# How long a turn waits for the grounder before planning without icons. The
+# grounder was 35-60s of every step, and most steps tap text that OCR already
+# lists — so it runs in the background and the planner only waits when it
+# asks for icons (`find_icons`). A cache hit is instant, which this covers.
+GROUNDER_WAIT = float(os.environ.get("PHONEFLOW_GROUNDER_WAIT", "0.5"))
 _UNSET = object()
 
 SYSTEM = """You drive an iPhone through macOS iPhone Mirroring on the owner's behalf.
 
-Each turn you get a screenshot of the phone and a numbered list of the text
-recognised on it, with one entry per line of text. Choose exactly one action per
-turn by calling one tool.
+Each turn you get a screenshot of the phone and a numbered list of what was
+recognised on it. Each number is also drawn on the screenshot as a small red tag
+next to the element it names, so match by the tag you see, not by guessing which
+text is nearest. Choose exactly one action per turn by calling one tool.
 
 Rules:
 - To tap something, call `tap` with the item number from the list. Never guess
   coordinates; if what you want is not in the list, scroll with `swipe` and look
   again.
-- The list mixes text read by OCR and icons located by a vision pass, the
-  latter marked `[icon]` (e.g. `[icon] search magnifier`). Both are tappable by
-  number. If something you can see in the screenshot is in neither, scroll or
-  leave the screen — do not tap "near" it.
+- The list starts with the text read by OCR. Icons with no text (a magnifier,
+  a bell, tab-bar icons) are not listed until you call `find_icons`, which adds
+  them marked `[icon]` (e.g. `[icon] search magnifier`). Both are tappable by
+  number. Prefer a text item when one does the job; call `find_icons` when the
+  control you need has no label. If something you can see is still in neither,
+  scroll or leave the screen — do not tap "near" it.
 - After each action you see the result, so take one step at a time and check.
 - Call `done` only when the goal is *visibly* met on the current screen, and
   quote the on-screen text that proves it in your summary. If you cannot point
   at that evidence in the list you were just given, the goal is not met — keep
   working or call `give_up`. Never report a result you did not actually see.
+- To go back, prefer tapping a visible back control on screen — a `<`, `‹`,
+  `Voltar`, `Back`, or a close `×` — over the system back gesture, since apps
+  often put their own back inside the screen. Use `system_button` back only when
+  no such control is visible.
 - You will be told when an action left the screen unchanged. When that happens,
   do not repeat it: try a different target, scroll at a different place with
   `at_item`, or leave the screen with `system_button`. An action that already
   did nothing will be refused if you send it again.
+- Never write a title, name or value you did not actually read on the current
+  screen. For anything you are collecting, save it with `record` when you see it
+  and report only recorded items. If you were asked to gather items and have none
+  recorded, call `give_up` — inventing a plausible answer is a serious failure,
+  worse than admitting you could not complete the task.
+- To open an app, call `open_app` once and wait. If it does not come up full
+  screen — you still see the home screen, a Spotlight search box, or a small
+  floating video / mini-player — do NOT tap launch icons repeatedly. Call
+  `reset_app` with the app name to force a clean launch. Two failed opens is
+  the signal to reset, not to try a third icon.
+- If you open the wrong thing (a video, an ad, a popup), recover deliberately:
+  close it, press back, or press home and reopen the app. Do not tap the same
+  "close"/"minimize"/"back" control more than twice — if it did not work, change
+  approach.
+- Social feeds (a home feed, a reels/shorts wall, a comments list) scroll
+  endlessly and never reach a true end — do not wait for one. Collect what the
+  goal asks for as you scroll and stop once you have it.
+- When the goal asks for SEVERAL items from a feed or list (e.g. "the first 3
+  video titles"), collect them incrementally: `record` each item as soon as it is
+  visible, then scroll for the next one. Do not scroll repeatedly trying to see
+  them all on one screen — a feed often shows one item at a time. Call `done` once
+  you have recorded the number asked for; the recorded list is returned.
+- If an app is unfamiliar, or a feature named in the goal seems missing or
+  renamed, call `read_app_doc` with the app name before guessing — it returns
+  notes on that app's layout, renamed features and popups.
+- If an app is unfamiliar, or a feature named in the goal seems missing or
+  renamed, call `read_app_doc` with the app name before guessing — it returns
+  notes on that app's layout, renamed features and popups.
+- App interfaces change over time, and a goal may name a feature by an old or
+  approximate label. Do not hunt for an exact word that is not on screen — map
+  the goal's INTENT to whatever the app calls it now and act on the closest
+  current equivalent. For example, YouTube removed "Trending"/"Em alta"; its
+  current equivalent is the "Hype" section. If after looking you cannot find the
+  literal target, pick the nearest equivalent that serves the same intent rather
+  than scrolling in circles, and say in your summary what you used.
+- If two consecutive looks at the screen did not reveal the target, stop
+  repeating the same scroll: change tactic (a different tab, search, or the
+  closest equivalent) or report what the app actually offers.
 - Call `give_up` if the goal is impossible, you are stuck in a loop, or the phone
   shows something you should not act on (a password prompt, a payment screen, a
   destructive confirmation). Do not confirm payments or purchases.
@@ -135,6 +186,11 @@ TOOLS = [
           ["direction", "why"]),
     _tool("long_press", "Press and hold an item — opens context menus.",
           {"item": {"type": "integer"}, "why": WHY}, ["item", "why"]),
+    _tool("drag",
+          "Drag from one item to another — reorder an icon, move a slider, "
+          "drag-and-drop. Give the item numbers to drag from and to.",
+          {"from_item": {"type": "integer"}, "to_item": {"type": "integer"}, "why": WHY},
+          ["from_item", "to_item", "why"]),
     _tool("system_button",
           "Device-level navigation. 'back' leaves the current screen, 'home' goes "
           "to the home screen, 'app_switcher' shows open apps.",
@@ -144,9 +200,31 @@ TOOLS = [
           {"text": {"type": "string"}, "why": WHY}, ["text", "why"]),
     _tool("open_app", "Open an app by name from the phone's home screen search.",
           {"app": {"type": "string"}, "why": WHY}, ["app", "why"]),
+    _tool("find_icons",
+          "The thing you need is an ICON with no text (magnifier, bell, tab-bar "
+          "icon, back arrow...) and it is not in the list yet. Locates the icons "
+          "on the current screen and adds them to the list. Costs no step.",
+          {"why": WHY}, ["why"]),
     _tool("wait", "Let the screen settle, then look again. Use this while an app "
           "is still loading or a list has not rendered yet.",
           {"why": WHY}, ["why"]),
+    _tool("scroll_to",
+          "Scroll a feed or list to find something, in one call, without stopping "
+          "each scroll. Give `label` (text to reach) to scroll until it appears; "
+          "omit it to just reveal the next screenful. It stops on its own when the "
+          "target shows up or when the screen stops changing (end of the list). "
+          "Use this instead of repeating `swipe` — it is faster and detects the end.",
+          {"label": {"type": "string", "description": "Text to scroll until visible (optional)."},
+           "direction": {"type": "string", "enum": ["up", "down"], "description": "'up' reveals what is below."},
+           "why": WHY},
+          ["direction", "why"]),
+    _tool("record",
+          "Save one item you were asked to collect (a video title, a name, a value) "
+          "as soon as you see it. Use this while scrolling a feed or list: record "
+          "each item as it appears instead of trying to see them all at once. Your "
+          "recorded items are kept and returned even across scrolls.",
+          {"text": {"type": "string", "description": "The exact item to save."}, "why": WHY},
+          ["text", "why"]),
     _tool("done", "The goal is met. Report what was found or accomplished.",
           {"summary": {"type": "string"}}, ["summary"]),
     _tool("give_up", "The goal cannot be reached, or it is not safe to continue.",
@@ -162,6 +240,102 @@ SWIPES = {
     "left": ({"x": 0.75, "y": 0.5}, {"x": 0.25, "y": 0.5}),
     "right": ({"x": 0.25, "y": 0.5}, {"x": 0.75, "y": 0.5}),
 }
+
+
+def _blocked_apps() -> list[str]:
+    """Apps the agent must never drive, from PHONEFLOW_BLOCKED_APPS (comma list).
+
+    A safety valve for distribution: banking, wallet and password apps should be
+    off-limits even if the goal names them, so an agent on someone's phone cannot
+    move money or read secrets. Matching is case-insensitive substring.
+    """
+    raw = os.environ.get("PHONEFLOW_BLOCKED_APPS", "")
+    return [a.strip().lower() for a in raw.split(",") if a.strip()]
+
+
+def _app_doc(name: str) -> str:
+    """The notes file for one app by name, from app_hints/ (see _load_app_hints)."""
+    import glob
+    key = (name or "").strip().lower()
+    if not key:
+        return ""
+    dirs = []
+    env = os.environ.get("PHONEFLOW_APP_HINTS")
+    if env:
+        dirs.append(env)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dirs.append(os.path.join(here, "app_hints"))
+    home = os.environ.get("PHONEFLOW_HOME")
+    if home:
+        dirs.append(os.path.join(home, "app_hints"))
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "*.md"))):
+            base = os.path.splitext(os.path.basename(path))[0].lower()
+            if base == key or base in key or key in base:
+                try:
+                    return open(path, encoding="utf-8").read().strip()
+                except OSError:
+                    pass
+    return ""
+
+
+def _app_doc(name: str) -> str:
+    """The notes file for one app by name, from app_hints/ (see _load_app_hints)."""
+    import glob
+    key = (name or "").strip().lower()
+    if not key:
+        return ""
+    dirs = []
+    env = os.environ.get("PHONEFLOW_APP_HINTS")
+    if env:
+        dirs.append(env)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dirs.append(os.path.join(here, "app_hints"))
+    home = os.environ.get("PHONEFLOW_HOME")
+    if home:
+        dirs.append(os.path.join(home, "app_hints"))
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "*.md"))):
+            base = os.path.splitext(os.path.basename(path))[0].lower()
+            if base == key or base in key or key in base:
+                try:
+                    return open(path, encoding="utf-8").read().strip()
+                except OSError:
+                    pass
+    return ""
+
+
+def _load_app_hints(goal: str) -> str:
+    """Return per-app guidance whose file name appears in the goal.
+
+    Hints live as `<app>.md` under app_hints/ (bundled) or PHONEFLOW_APP_HINTS.
+    They carry what a generic model cannot know — a renamed tab, a popup to
+    dismiss, how a feed paginates — so the agent handles each app without any
+    app-specific code. Anyone can drop a new file to support a new app.
+    """
+    import glob
+    g = (goal or "").lower()
+    dirs = []
+    env = os.environ.get("PHONEFLOW_APP_HINTS")
+    if env:
+        dirs.append(env)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dirs.append(os.path.join(here, "app_hints"))
+    home = os.environ.get("PHONEFLOW_HOME")
+    if home:
+        dirs.append(os.path.join(home, "app_hints"))
+    seen, out = set(), []
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "*.md"))):
+            name = os.path.splitext(os.path.basename(path))[0].lower()
+            if name in seen or name not in g:
+                continue
+            try:
+                out.append(open(path, encoding="utf-8").read().strip())
+                seen.add(name)
+            except OSError:
+                continue
+    return "\n\n".join(out)
 
 
 def _client():
@@ -345,6 +519,10 @@ class AgentLoop:
         self.max_steps = max_steps
         # Default on; tests pass grounder=None to keep the loop off the network.
         self.grounder = IconGrounder(self.client) if grounder is _UNSET else grounder
+        self._pool = ThreadPoolExecutor(max_workers=1)
+        self._icons = None
+        self.records: list[str] = []
+        self._key_counts: dict[str, int] = {}
         self.steps: list[dict] = []
         self._waits = 0  # consecutive-ish waits; waiting is not a strategy
         # Actions observed to leave the screen exactly as it was. Re-sending one
@@ -354,28 +532,101 @@ class AgentLoop:
 
     # ---- perception ----------------------------------------------------
 
-    def _observe(self) -> tuple[bytes, list[dict]]:
+    def _observe(self) -> tuple[bytes, list[dict], dict | None]:
         if hasattr(self.driver, "observe"):
             items, frame, geom = self.driver.observe()
             items = list(items)
         else:  # drivers without the fused call (tests, older mirrors)
             raw = self.driver.screenshot()
             items, frame, geom = list(self.driver.ocr_items(raw)), self.driver.frame_for_model(), None
+        self._icons = None
+        # If the driver already located icons locally (pf_icons / CoreML), those
+        # are exact and free — the cloud grounder is only a fallback for drivers
+        # without a local model.
+        if any(str(it.get("t", "")).startswith("[icon]") for it in items):
+            return frame, items, geom
         if self.grounder is not None:
             try:
                 if geom is None:
                     crop, geom = self.driver.window_crop(raw)
                 else:
                     crop = frame
-                icons = self.grounder.find(crop, geom, items)
+                # Grounding is the slow part of a step and usually not needed:
+                # it runs alongside planning and is only awaited on demand.
+                self._icons = self._pool.submit(self.grounder.find, crop, geom, items)
+                items.extend(self._await_icons(GROUNDER_WAIT))
             except Exception as exc:  # never let the aid take the run down
                 print(f"[grounder] skipped: {exc}", flush=True)
-                icons = []
-            if icons:
-                print(f"[grounder] {len(icons)} icons: "
-                      + ", ".join(i["t"].replace("[icon] ", "") for i in icons), flush=True)
-            items.extend(icons)
-        return frame, items
+        return frame, items, geom
+
+    def _await_icons(self, timeout: float | None) -> list[dict]:
+        """Icons from the pending grounding pass, or [] if it is not done yet."""
+        fut = self._icons
+        if fut is None:
+            return []
+        try:
+            icons = fut.result(timeout=timeout)
+        except TimeoutError:
+            return []
+        except Exception as exc:
+            print(f"[grounder] failed: {exc}", flush=True)
+            icons = []
+        self._icons = None
+        if icons:
+            print(f"[grounder] {len(icons)} icons: "
+                  + ", ".join(i["t"].replace("[icon] ", "") for i in icons), flush=True)
+        return icons
+
+    @staticmethod
+    def _mark(frame: bytes, items: list[dict], geom: dict | None) -> bytes:
+        """Set-of-Mark: draw each item's number on the frame where it sits.
+
+        The planner used to get a bare screenshot and a numbered list, and had
+        to pair them by reading the text in the image — which is exactly where
+        it went wrong on rows of similar buttons and on icons whose only name
+        was the grounder's guess. With the number printed on the element the
+        pairing is visual and there is nothing left to infer. Fails soft: any
+        problem returns the plain frame.
+        """
+        if not items or not geom:
+            return frame
+        try:
+            import io
+            from PIL import Image, ImageDraw, ImageFont
+            pos, size = geom.get("pos", (0, 0)), geom.get("size", (1, 1))
+            im = Image.open(io.BytesIO(frame)).convert("RGB")
+            w, h = im.size
+            draw = ImageDraw.Draw(im)
+            fs = max(14, int(h / 45))
+            try:
+                font = ImageFont.truetype("DejaVuSans-Bold.ttf", fs)
+            except OSError:
+                try:
+                    font = ImageFont.load_default(size=fs)
+                except TypeError:  # Pillow < 10 has no sized default
+                    font = ImageFont.load_default()
+            for n, it in enumerate(items, 1):
+                # Screen points back into frame pixels: the frame is the window
+                # crop, scaled, so the fraction along the window is the fraction
+                # along the image.
+                x = (float(it.get("x", 0)) - pos[0]) / max(size[0], 1) * w
+                y = (float(it.get("y", 0)) - pos[1]) / max(size[1], 1) * h
+                label = str(n)
+                l, t, r, b = draw.textbbox((0, 0), label, font=font)
+                tw, th = r - l, b - t
+                # Tag sits just above-left of the centre so it never hides the
+                # element it names, and stays inside the image at the edges.
+                x0 = min(max(x - tw - 14, 0), w - tw - 4)
+                y0 = min(max(y - th - 12, 0), h - th - 4)
+                draw.rectangle([x0, y0, x0 + tw + 4, y0 + th + 4], fill=(220, 30, 30))
+                draw.text((x0 + 2 - l, y0 + 2 - t), label, fill="white", font=font)
+                draw.ellipse([x - 3, y - 3, x + 3, y + 3], outline=(220, 30, 30), width=2)
+            out = io.BytesIO()
+            im.save(out, format="JPEG", quality=75)
+            return out.getvalue()
+        except Exception as exc:  # the marks are an aid; the frame is not optional
+            print(f"[mark] skipped: {exc}", flush=True)
+            return frame
 
     @staticmethod
     def _signature(items: list[dict]) -> tuple:
@@ -417,6 +668,18 @@ class AgentLoop:
         if not items:
             return "(no text recognised on screen)"
         return "\n".join(f"{i}. {it.get('t','')}" for i, it in enumerate(items, 1))
+
+    @staticmethod
+    def _nav_hint(items: list[dict]) -> str:
+        """A NavigationHintDetector-style nudge: name a visible back/close control
+        so the model uses it instead of guessing its way out of a screen."""
+        import re as _re
+        pat = _re.compile(r"^\s*(<|‹|×|✕|✖|back|voltar|cancelar|cancel|fechar|close|done|concluir)\b", _re.I)
+        for i, it in enumerate(items, 1):
+            t = str(it.get("t", ""))
+            if pat.match(t):
+                return f"A back/close control is visible: item {i} ({t!r}). Use it to leave this screen.\n\n"
+        return ""
 
     def _turn(self, goal: str, small: bytes, items: list[dict], left: int, note: str = "") -> dict:
         b64 = base64.standard_b64encode(small).decode()
@@ -483,9 +746,40 @@ class AgentLoop:
         if name == "type_text":
             self.driver.type_text(args["text"])
             return f"Typed {args['text']!r}."
+        if name == "read_app_doc":
+            doc = _app_doc(args.get("app", ""))
+            return ("Notes for %r:\n%s" % (args.get("app", ""), doc)) if doc \
+                else f"No notes on file for {args.get('app','')!r}. Proceed carefully and observe the screen."
+        if name == "read_app_doc":
+            doc = _app_doc(args.get("app", ""))
+            return ("Notes for %r:\n%s" % (args.get("app", ""), doc)) if doc \
+                else f"No notes on file for {args.get('app','')!r}. Proceed carefully and observe the screen."
         if name == "open_app":
-            self.driver.open_app(args["app"])
-            return f"Opened {args['app']!r}."
+            app = args.get("app", "")
+            if any(b in app.lower() for b in _blocked_apps()):
+                return f"Refused: {app!r} is a blocked app you are not allowed to open."
+            self.driver.open_app(app)
+            return f"Opened {app!r}."
+        if name == "drag":
+            fi, ti = int(args.get("from_item", 0)), int(args.get("to_item", 0))
+            if not (1 <= fi <= len(items) and 1 <= ti <= len(items)):
+                return f"Bad items for drag; the list has {len(items)} entries."
+            a, b = items[fi - 1], items[ti - 1]
+            if hasattr(self.driver, "drag"):
+                self.driver.drag(a["x"], a["y"], b["x"], b["y"])
+                return f"Dragged {a.get('t','')!r} onto {b.get('t','')!r}."
+            return "This driver cannot drag."
+        if name == "reset_app":
+            app = args.get("app", "")
+            if any(b in app.lower() for b in _blocked_apps()):
+                return f"Refused: {app!r} is a blocked app."
+            if hasattr(self.driver, "reset_app"):
+                self.driver.reset_app(app)
+            else:
+                self.driver.system_key("home")
+                if app:
+                    self.driver.open_app(app)
+            return f"Reset and reopened {app!r}."
         if name == "wait":
             self._waits += 1
             if self._waits > 3:
@@ -503,11 +797,16 @@ class AgentLoop:
     def run(self, goal: str) -> dict:
         """Drive the phone until the goal is met, refused, or the budget runs out."""
         messages: list[dict] = [{"role": "system", "content": SYSTEM}]
+        hints = _load_app_hints(goal)
+        if hints:
+            messages.append({"role": "system",
+                             "content": "App-specific notes for this task:\n" + hints})
         idle = 0  # consecutive replies that chose no action
         prev_sig: tuple | None = None
         last_key: str | None = None
         for step in range(self.max_steps):
-            small, items = self._observe()
+            small, items, geom = self._observe()
+            small = self._mark(small, items, geom)
             sig = self._signature(items)
             # Saying this out loud is what stops the loop dead: the model cannot
             # see that its last action achieved nothing, and left to guess it
@@ -516,7 +815,13 @@ class AgentLoop:
             if last_key and prev_sig is not None and sig == prev_sig:
                 self._dead.add(last_key)
                 note = "The screen did not change after your last action. Try something else.\n\n"
+            if self.max_steps - step <= 3:
+                note += ("You are almost out of steps. If you have gathered what was "
+                         "asked (check your recorded items), call done using ONLY those. "
+                         "If you have not, call give_up honestly — never invent a title, "
+                         "name or value you did not read on screen.\n\n")
             prev_sig = sig
+            note += self._nav_hint(items)
             self._strip_old_images(messages)
             messages.append(self._turn(goal, small, items, self.max_steps - step, note))
             reply = self.client.chat.completions.create(
@@ -527,22 +832,7 @@ class AgentLoop:
             )
             choice = reply.choices[0].message
             calls = choice.tool_calls or []
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": choice.content or "",
-                    "tool_calls": [
-                        {
-                            "id": c.id,
-                            "type": "function",
-                            "function": {"name": c.function.name, "arguments": c.function.arguments},
-                        }
-                        for c in calls
-                    ],
-                }
-                if calls
-                else {"role": "assistant", "content": choice.content or ""}
-            )
+            messages.append(self._assistant(choice, calls))
 
             if not calls:
                 # Why there is no action matters, and an empty reply hides it:
@@ -574,14 +864,123 @@ class AgentLoop:
             # finishes, so without this a long loop is a black box while it runs.
             print(f"[agent] step {step + 1}/{self.max_steps} {name} {args}", flush=True)
 
+            if name == "scroll_to":
+                label = str(args.get("label", "") or "").strip().lower()
+                direction = args.get("direction", "up")
+                sigs = set()
+                outcome = None
+                for _ in range(8):
+                    texts = [str(it.get("t", "")) for it in items]
+                    if label and any(label in t.lower() for t in texts):
+                        outcome = f"'{args.get('label')}' is on screen now."
+                        break
+                    sig = self._signature(items)
+                    if sig in sigs:
+                        outcome = ("Reached the end — scrolling no longer changes the "
+                                   "screen." if label == "" or not label
+                                   else f"Reached the end without finding '{args.get('label')}'.")
+                        break
+                    sigs.add(sig)
+                    try:
+                        self.driver.swipe_from(0.5, 0.6, direction, 0.6) if hasattr(self.driver, "swipe_from") \
+                            else self.driver.swipe(SWIPES[direction]["from"], SWIPES[direction]["to"], 320)
+                    except Exception as exc:
+                        outcome = f"Could not scroll: {exc}"
+                        break
+                    small, items, geom = self._observe()
+                if outcome is None:
+                    outcome = "Scrolled several times; more may remain."
+                # Show the planner the screen it scrolled to.
+                self._strip_old_images(messages)
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": outcome})
+                marked = self._mark(small, items, geom)
+                b64 = base64.standard_b64encode(marked).decode()
+                messages.append({"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
+                    {"type": "text", "text": "Text on screen:\n" + self._listing(items)
+                     + "\n\nChoose one action."}]})
+                prev_sig = self._signature(items)
+                continue
+            if name == "open_app":
+                app = str(args.get("app", ""))
+                self._open_attempts = getattr(self, "_open_attempts", {})
+                self._open_attempts[app] = self._open_attempts.get(app, 0) + 1
+                if self._open_attempts[app] >= 2 and hasattr(self.driver, "reset_app"):
+                    print(f"[agent] step {step + 1}/{self.max_steps} auto reset_app {app!r} (launch not sticking)", flush=True)
+                    try:
+                        self.driver.reset_app(app)
+                    except Exception as exc:
+                        self.driver.open_app(app)
+                    messages.append({"role": "tool", "tool_call_id": call.id,
+                                     "content": f"open_app kept failing, so I force-quit and reopened {app!r}. "
+                                                "It should now be full screen — look and continue."})
+                    continue
+            if name == "record":
+                text = str(args.get("text", "")).strip()
+                if text and text not in self.records:
+                    self.records.append(text)
+                messages.append({"role": "tool", "tool_call_id": call.id,
+                                 "content": f"Recorded {len(self.records)} so far: "
+                                            + " | ".join(self.records)})
+                continue
             if name == "done":
                 return self._finish("succeeded", args.get("summary", ""), step)
             if name == "give_up":
                 return self._finish("given_up", args.get("reason", ""), step)
 
+            if name == "find_icons":
+                icons = [i for i in self._await_icons(None) if i not in items]
+                items.extend(icons)
+                # The same frame, now with the icons' numbers drawn on it too.
+                content = [{"type": "text", "text": ("Icons added to the list:\n" + self._listing(items)
+                                                     if icons else "No icons were found on this screen.")}]
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": content[0]["text"]})
+                if icons:
+                    self._strip_old_images(messages)
+                    marked = self._mark(small, items, geom)
+                    b64 = base64.standard_b64encode(marked).decode()
+                    messages.append({"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}},
+                        {"type": "text", "text": "Same screen with the icons numbered. Choose one action."}]})
+                    reply = self.client.chat.completions.create(
+                        model=self.model, max_tokens=MAX_TOKENS, tools=TOOLS, messages=messages)
+                    choice = reply.choices[0].message
+                    calls = choice.tool_calls or []
+                    messages.append(self._assistant(choice, calls))
+                    if not calls:
+                        continue
+                    call = calls[0]
+                    name = call.function.name
+                    raw = call.function.arguments
+                    try:
+                        args = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+                    except json.JSONDecodeError:
+                        return self._finish("stalled", f"unparseable arguments for {name}: {raw!r}", step)
+                    self.steps.append({"step": step + 1, "action": name, "args": args})
+                    print(f"[agent] step {step + 1}/{self.max_steps} {name} {args}", flush=True)
+                    if name == "done":
+                        return self._finish("succeeded", args.get("summary", ""), step)
+                    if name == "give_up":
+                        return self._finish("given_up", args.get("reason", ""), step)
+                else:
+                    continue
+
             # `wait` is exempt: waiting twice on a genuinely loading screen is
             # correct, and its own budget already stops it becoming a strategy.
-            key = self._key(name, args, items) if name != "wait" else ""
+            key = self._key(name, args, items) if name not in ("wait", "find_icons") else ""
+            if key:
+                self._key_counts[key] = self._key_counts.get(key, 0) + 1
+            if key and self._key_counts.get(key, 0) >= 3 and key not in self._dead:
+                observation = (
+                    "Refused: you have tried this same target three times with no "
+                    "progress — you are in a loop. Do something different: press the "
+                    "home button and reopen the app, choose a clearly different item, "
+                    "or give_up honestly. Do not repeat this."
+                )
+                self._dead.add(key)
+                last_key = None
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": observation})
+                continue
             if key and key in self._dead:
                 # Refusing costs one cheap turn; executing it again costs a turn
                 # *and* leaves the model with the same screen and no new
@@ -604,6 +1003,20 @@ class AgentLoop:
         return self._finish("out_of_steps", f"budget of {self.max_steps} steps exhausted", self.max_steps)
 
     @staticmethod
+    def _assistant(choice, calls) -> dict:
+        if not calls:
+            return {"role": "assistant", "content": choice.content or ""}
+        return {
+            "role": "assistant",
+            "content": choice.content or "",
+            "tool_calls": [
+                {"id": c.id, "type": "function",
+                 "function": {"name": c.function.name, "arguments": c.function.arguments}}
+                for c in calls
+            ],
+        }
+
+    @staticmethod
     def _strip_old_images(messages: list[dict]) -> None:
         """Keep only the newest screenshot in the conversation.
 
@@ -621,4 +1034,8 @@ class AgentLoop:
                 m["content"] = kept or [{"type": "text", "text": "(earlier screen)"}]
 
     def _finish(self, status: str, message: str, step: int) -> dict:
-        return {"status": status, "message": message, "steps": self.steps, "used": step + 1}
+        out = {"status": status, "message": message, "steps": self.steps, "used": step + 1}
+        if self.records:
+            out["records"] = list(self.records)
+            out["message"] = (message + "\n\nColetado:\n- " + "\n- ".join(self.records)).strip()
+        return out

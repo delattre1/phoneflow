@@ -66,16 +66,51 @@ req.recognitionLanguages = ["pt-BR", "en-US"]
 try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
 
 var out: [String] = []
-for obs in (req.results ?? []) {
-    guard let top = obs.topCandidates(1).first else { continue }
-    let b = obs.boundingBox
-    let cx = Double(b.origin.x) + Double(b.width) / 2.0
-    let cy = 1.0 - (Double(b.origin.y) + Double(b.height) / 2.0)
-    let esc = top.string.data(using: .utf8).flatMap {
+func emit(_ text: String, _ box: CGRect) {
+    let cx = Double(box.origin.x) + Double(box.width) / 2.0
+    let cy = 1.0 - (Double(box.origin.y) + Double(box.height) / 2.0)
+    let esc = text.data(using: .utf8).flatMap {
         String(data: try! JSONSerialization.data(withJSONObject: [String(data: $0, encoding: .utf8)!]), encoding: .utf8)
     } ?? "[\"\"]"
     let t = String(esc.dropFirst().dropLast())
     out.append("{\"t\":\(t),\"nx\":\(cx),\"ny\":\(cy)}")
+}
+// Vision returns one observation per LINE, so a tab bar ("Home  Shorts  You")
+// or a pair of buttons ("Cancel   OK") came back as one item whose centre sat
+// between the targets — the agent asked for "Shorts" and tapped the gap. Each
+// line is split at gaps clearly wider than a space (a segment is a run of words
+// whose spacing is normal), so every button on a row gets its own centre.
+for obs in (req.results ?? []) {
+    guard let top = obs.topCandidates(1).first else { continue }
+    let str = top.string
+    var words: [(String, CGRect)] = []
+    var i = str.startIndex
+    while i < str.endIndex {
+        while i < str.endIndex, str[i].isWhitespace { i = str.index(after: i) }
+        if i >= str.endIndex { break }
+        var j = i
+        while j < str.endIndex, !str[j].isWhitespace { j = str.index(after: j) }
+        if let r = try? top.boundingBox(for: i..<j) {
+            words.append((String(str[i..<j]), r.boundingBox))
+        }
+        i = j
+    }
+    if words.count < 2 { emit(str, obs.boundingBox); continue }
+    // A typical space is about a third of the line height; anything past a
+    // full line height is a gap between separate controls.
+    let gapLimit = Double(obs.boundingBox.height) * 1.0
+    var seg: [(String, CGRect)] = [words[0]]
+    func flush() {
+        let text = seg.map { $0.0 }.joined(separator: " ")
+        let x0 = seg.map { Double($0.1.minX) }.min()!, x1 = seg.map { Double($0.1.maxX) }.max()!
+        let y0 = seg.map { Double($0.1.minY) }.min()!, y1 = seg.map { Double($0.1.maxY) }.max()!
+        emit(text, CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+    }
+    for w in words.dropFirst() {
+        let gap = Double(w.1.minX) - Double(seg.last!.1.maxX)
+        if gap > gapLimit { flush(); seg = [w] } else { seg.append(w) }
+    }
+    flush()
 }
 print("{\"w\":\(Int(sw)),\"h\":\(Int(sh)),\"sw\":\(Int(scr.width)),\"sh\":\(Int(scr.height)),\"lines\":[\(out.joined(separator: ","))]}")
 """
@@ -105,6 +140,9 @@ let ms = isClick ? 0.0 : (Double(a[5]) ?? 300.0)
 
 let src = CGEventSource(stateID: .hidSystemState)
 
+// Where the owner's pointer was before we hijack it, so we can put it back.
+let origin = CGEvent(source: nil)?.location ?? CGPoint(x: x1, y: y1)
+
 func post(_ type: CGEventType, _ x: Double, _ y: Double) {
     CGEvent(mouseEventSource: src, mouseType: type,
             mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)?
@@ -123,6 +161,11 @@ if isClick {
     // duration, so the only difference from a tap is how long the button is down.
     usleep(useconds_t(max(holdMs, 60.0) * 1000))
     post(.leftMouseUp, x1, y1)
+    // Return the pointer to where the owner left it (see `origin`), so the agent
+    // does not leave the cursor sitting on the phone window between actions.
+    usleep(useconds_t(20_000))
+    CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+            mouseCursorPosition: origin, mouseButton: .left)?.post(tap: .cghidEventTap)
     print("OK")
     exit(0)
 }
@@ -139,7 +182,193 @@ for i in 1...steps {
     usleep(useconds_t(perStep * 1000))
 }
 post(.leftMouseUp, x2, y2)
+usleep(useconds_t(20_000))
+CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+        mouseCursorPosition: origin, mouseButton: .left)?.post(tap: .cghidEventTap)
 print("OK")
+"""
+
+SCROLL_SWIFT = r"""// PhoneFlow scroll — a trackpad-style scroll gesture, not a mouse drag.
+//
+// iPhone Mirroring reacts to real trackpad scroll semantics, not to a pressed
+// mouse dragged across the window (that grabs videos, selects text, or does
+// nothing). This posts continuous scroll-wheel events carrying the CGEvent
+// gesture phase fields — MayBegin to wake the handler, Began/Changed while the
+// "finger" moves, Ended on lift, then a decaying momentum tail so feeds and
+// carousels flick to the next page. Modelled on Mirroir's CGEventInput.swift.
+//
+// usage: pf_scroll <midX> <midY> <fingerDX> <fingerDY> [durationMs]
+//   fingerDX/DY is the finger movement in points; content follows the finger.
+import Foundation
+import CoreGraphics
+
+let a = CommandLine.arguments
+guard a.count >= 5,
+      let mx = Double(a[1]), let my = Double(a[2]),
+      let dx = Double(a[3]), let dy = Double(a[4]) else {
+    FileHandle.standardError.write("usage: pf_scroll midX midY fingerDX fingerDY [durationMs]\n".data(using: .utf8)!)
+    exit(2)
+}
+let durationMs = max(min(a.count > 5 ? (Int(a[5]) ?? 260) : 260, 2000), 80)
+
+let amplification = 3.0
+let flickThreshold = 500.0
+let decay = 0.94
+let momentumMax = 90
+let frameMs = 16
+let minDrag = 5
+let warpSettleUs: UInt32 = 100_000
+let frameUs: UInt32 = 16_000
+
+let mid = CGPoint(x: mx, y: my)
+let scrollPhase = CGEventField(rawValue: 99)!
+let momentumPhase = CGEventField(rawValue: 123)!
+let isContinuous = CGEventField(rawValue: 88)!
+let pDeltaY = CGEventField(rawValue: 96)!
+let pDeltaX = CGEventField(rawValue: 97)!
+
+func makeScroll(_ w1: Int32, _ w2: Int32) -> CGEvent? {
+    guard let s = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                          wheelCount: 2, wheel1: w1, wheel2: w2, wheel3: 0) else { return nil }
+    s.location = mid
+    s.setIntegerValueField(isContinuous, value: 1)
+    s.setIntegerValueField(pDeltaY, value: Int64(w1))
+    s.setIntegerValueField(pDeltaX, value: Int64(w2))
+    return s
+}
+func emit(_ w1: Int32, _ w2: Int32, phase: Int64, momentum: Int64) {
+    guard let s = makeScroll(w1, w2) else { return }
+    s.setIntegerValueField(scrollPhase, value: phase)
+    s.setIntegerValueField(momentumPhase, value: momentum)
+    s.post(tap: .cghidEventTap)
+}
+
+// Establish the cursor inside the window and wake the scroll subsystem.
+CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: mid, mouseButton: .left)?
+    .post(tap: .cghidEventTap)
+usleep(50_000)
+emit(0, 0, phase: 128, momentum: 0)   // MayBegin
+usleep(warpSettleUs)
+
+// Content follows the finger: wheel sign matches finger delta.
+let totalW1 = dy * amplification
+let totalW2 = dx * amplification
+let seconds = Double(durationMs) / 1000.0
+let velocity = (dx * dx + dy * dy).squareRoot() / max(seconds, 0.001)
+let dragSteps = max(minDrag, durationMs / frameMs)
+let stepDelayUs = UInt32(durationMs) * 1000 / UInt32(dragSteps)
+
+func splitEven(_ total: Double, _ n: Int) -> [Int32] {
+    var out = [Int32](); var acc = 0.0; var placed: Int64 = 0
+    for i in 1...n {
+        acc = total * Double(i) / Double(n)
+        let target = Int64(acc.rounded())
+        out.append(Int32(target - placed)); placed = target
+    }
+    return out
+}
+
+if velocity >= flickThreshold {
+    // Flick: ~30% in the drag phase, ~70% in a decaying momentum tail.
+    let dragW1 = splitEven(totalW1 * 0.3, dragSteps)
+    let dragW2 = splitEven(totalW2 * 0.3, dragSteps)
+    for i in 0..<dragSteps {
+        emit(dragW1[i], dragW2[i], phase: i == 0 ? 1 : 2, momentum: 0)
+        usleep(stepDelayUs)
+    }
+    emit(0, 0, phase: 4, momentum: 0)   // Ended
+    usleep(frameUs)
+    // Momentum: geometric decay carrying the remaining 70%.
+    var remW1 = totalW1 * 0.7, remW2 = totalW2 * 0.7
+    // Peak per-frame velocity ~ remaining * (1-decay)
+    var fW1 = remW1 * (1 - decay), fW2 = remW2 * (1 - decay)
+    for i in 0..<momentumMax {
+        if abs(remW1) < 1 && abs(remW2) < 1 { break }
+        let w1 = Int32(fW1.rounded()), w2 = Int32(fW2.rounded())
+        emit(w1, w2, phase: 0, momentum: i == 0 ? 1 : 2)
+        remW1 -= fW1; remW2 -= fW2; fW1 *= decay; fW2 *= decay
+        usleep(frameUs)
+    }
+    emit(0, 0, phase: 0, momentum: 3)   // momentum End
+} else {
+    // Deliberate drag-scroll: even frames, no momentum.
+    let w1 = splitEven(totalW1, dragSteps), w2 = splitEven(totalW2, dragSteps)
+    for i in 0..<dragSteps {
+        emit(w1[i], w2[i], phase: i == 0 ? 1 : 2, momentum: 0)
+        usleep(stepDelayUs)
+    }
+    emit(0, 0, phase: 4, momentum: 0)   // Ended
+}
+print("OK")
+"""
+
+ICONS_SWIFT = r"""// PhoneFlow icon detection — local CoreML object detector over a screenshot.
+//
+// OCR (pf_ocr) reads text; this finds the tappable ICONS that carry no text —
+// a magnifier, a bell, tab-bar glyphs — which text recognition structurally
+// cannot return. It runs the OmniParser `icon_detect` YOLO (or any Vision
+// object-detection .mlpackage/.mlmodelc) entirely on the Mac, so no frame ever
+// leaves the machine and a step costs tens of milliseconds instead of a cloud
+// round trip. The model is supplied by the owner (see PHONEFLOW_ICON_MODEL);
+// when it is absent the driver simply skips icon detection.
+//
+// Prints one JSON object on stdout, coordinates normalised to the image with a
+// TOP-LEFT origin so it maps exactly like pf_ocr's boxes:
+//   {"w":<px>,"h":<px>,"boxes":[{"nx":cx,"ny":cy,"nw":w,"nh":h,"conf":c}]}
+import Foundation
+import Vision
+import CoreML
+import AppKit
+
+let args = CommandLine.arguments
+guard args.count > 2 else {
+    FileHandle.standardError.write("usage: pf_icons <image> <model.mlpackage|.mlmodelc> [conf]\n".data(using: .utf8)!)
+    exit(2)
+}
+let imagePath = args[1], modelPath = args[2]
+let conf = args.count > 3 ? (Double(args[3]) ?? 0.20) : 0.20
+
+guard let img = NSImage(contentsOfFile: imagePath),
+      let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+    FileHandle.standardError.write("cannot read image\n".data(using: .utf8)!); exit(2)
+}
+let W = Double(cg.width), H = Double(cg.height)
+
+// Compiling a .mlpackage takes ~1.5s, so it is done once and the compiled
+// .mlmodelc is cached beside the model; every later call loads that directly
+// and the whole run is back to tens of milliseconds. A .mlmodelc is used as-is.
+let url = URL(fileURLWithPath: modelPath)
+func compiledURL() -> URL? {
+    if modelPath.hasSuffix(".mlmodelc") { return url }
+    let cache = url.deletingPathExtension().appendingPathExtension("mlmodelc")
+    if FileManager.default.fileExists(atPath: cache.path) { return cache }
+    guard let tmp = try? MLModel.compileModel(at: url) else { return nil }
+    try? FileManager.default.removeItem(at: cache)
+    try? FileManager.default.copyItem(at: tmp, to: cache)
+    return FileManager.default.fileExists(atPath: cache.path) ? cache : tmp
+}
+guard let cURL = compiledURL(),
+      let mlmodel = try? MLModel(contentsOf: cURL),
+      let vnModel = try? VNCoreMLModel(for: mlmodel) else {
+    FileHandle.standardError.write("cannot load model at \(modelPath)\n".data(using: .utf8)!); exit(3)
+}
+
+let req = VNCoreMLRequest(model: vnModel)
+// Letterbox to match YOLO training; Vision reports boxes back in image space.
+req.imageCropAndScaleOption = .scaleFit
+
+try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
+
+var out: [String] = []
+for obs in (req.results as? [VNRecognizedObjectObservation] ?? []) {
+    guard Double(obs.confidence) >= conf else { continue }
+    let b = obs.boundingBox // normalised, bottom-left origin
+    let cx = Double(b.origin.x) + Double(b.width) / 2.0
+    let cy = 1.0 - (Double(b.origin.y) + Double(b.height) / 2.0) // flip to top-left
+    out.append(String(format: "{\"nx\":%.5f,\"ny\":%.5f,\"nw\":%.5f,\"nh\":%.5f,\"conf\":%.3f}",
+                      cx, cy, Double(b.width), Double(b.height), Double(obs.confidence)))
+}
+print("{\"w\":\(Int(W)),\"h\":\(Int(H)),\"boxes\":[\(out.joined(separator: ","))]}")
 """
 
 OBSERVE_SCRIPT = r"""#!/bin/sh
@@ -167,8 +396,15 @@ sips -c "$(echo "$H*$S" | bc | cut -d. -f1)" "$(echo "$W*$S" | bc | cut -d. -f1)
 LONG=$(echo "$H*$S*$UP" | bc | cut -d. -f1)
 sips -Z "$LONG" "$C" >/dev/null
 OCR=$("$HOME/.phoneflow/pf_ocr" "$C")
+# Local icon detection over the same crop, only if the owner supplied a model
+# (PHONEFLOW_ICON_MODEL); absent, icons is null and the driver skips them.
+ICON_MODEL="$HOME/.phoneflow/icon_detect.mlpackage"
+ICONS=null
+if [ -e "$ICON_MODEL" ] && [ -x "$HOME/.phoneflow/pf_icons" ]; then
+  ICONS=$("$HOME/.phoneflow/pf_icons" "$C" "$ICON_MODEL" 2>/dev/null || echo null)
+fi
 sips -s format jpeg -s formatOptions 70 -Z "$JMAX" "$C" --out "$J" >/dev/null
-printf '{"ocr":%s,"frame":"%s"}' "$OCR" "$(base64 -i "$J")"
+printf '{"ocr":%s,"icons":%s,"frame":"%s"}' "$OCR" "$ICONS" "$(base64 -i "$J")"
 """
 
 LOCK_RE = re.compile(r"Passcode|Touch ID|Enter Password|Código|Senha do Mac")
@@ -180,6 +416,10 @@ OCR_DIR = os.environ.get("PHONEFLOW_OCR_DIR", "$HOME/.phoneflow")
 OCR_BIN = OCR_DIR + "/pf_ocr"
 OBSERVE_SH = OCR_DIR + "/pf_observe.sh"
 DRAG_BIN = OCR_DIR + "/pf_drag"
+ICONS_BIN = OCR_DIR + "/pf_icons"
+SCROLL_BIN = OCR_DIR + "/pf_scroll"
+# Owner-supplied CoreML icon detector (OmniParser icon_detect or similar).
+ICON_MODEL = OCR_DIR + "/icon_detect.mlpackage"
 _UNSET = object()
 
 
@@ -563,17 +803,24 @@ class LatchDriver:
         for binary, source, code in (
             (OCR_BIN, OCR_DIR + "/pf_ocr.swift", OCR_SWIFT),
             (DRAG_BIN, OCR_DIR + "/pf_drag.swift", DRAG_SWIFT),
+            (ICONS_BIN, OCR_DIR + "/pf_icons.swift", ICONS_SWIFT),
+            (SCROLL_BIN, OCR_DIR + "/pf_scroll.swift", SCROLL_SWIFT),
         ):
+            # Keyed on the source, not on the binary's existence: a Mac that
+            # built an earlier pf_ocr would otherwise keep it forever, and a
+            # fix to the helper would never reach the phone.
+            stamp = hashlib.sha256(code.encode("utf-8")).hexdigest()[:16]
             probe = self._applescript(
-                'do shell script "test -x %s && echo yes || echo no"' % binary
+                'do shell script "test -x %s && test \\"$(cat %s.sha 2>/dev/null)\\" = %s && echo yes || echo no"'
+                % (binary, binary, stamp)
             ).strip()
             if probe == "yes":
                 continue
             self._call("plow_write_file", {"path": self._on_mac(source), "content": code})
             try:
                 self._applescript(
-                    'do shell script "mkdir -p %s && xcrun swiftc -O -o %s %s"'
-                    % (OCR_DIR, binary, source)
+                    'do shell script "mkdir -p %s && xcrun swiftc -O -o %s %s && echo %s > %s.sha"'
+                    % (OCR_DIR, binary, source, stamp, binary)
                 )
             except DriverError as exc:
                 raise DriverError("ocr_unavailable", f"could not build {binary}: {exc}") from exc
@@ -656,6 +903,39 @@ class LatchDriver:
                 "x": pos[0] + float(l.get("nx", 0)) * size[0],
                 "y": pos[1] + float(l.get("ny", 0)) * size[1],
             })
+        # Local icon detections (pf_icons) map exactly like OCR: the crop is the
+        # window, so a box centre normalised to the crop lands on the window
+        # rectangle. Boxes in the titlebar band are Mac chrome, not the phone.
+        top_frac = self.titlebar_px / max(size[1], 1)
+        icons = []
+        for b in (data.get("icons") or {}).get("boxes") or []:
+            ny = float(b.get("ny", 0))
+            if ny < top_frac:
+                continue
+            icons.append({
+                "t": "[icon]",
+                "x": pos[0] + float(b.get("nx", 0)) * size[0],
+                "y": pos[1] + ny * size[1],
+            })
+        # Snap short text labels onto the icon directly above them. Vision reads
+        # the label under an app icon or a tab-bar glyph, but the tappable target
+        # is the icon — tapping the text launches nothing. If a detected icon
+        # sits just above a short label and shares its column, move the label's
+        # tap point up onto the icon, the way TapPointCalculator offsets labels.
+        col = size[0] * 0.10
+        near = size[1] * 0.14
+        for it in items:
+            t = it.get("t", "")
+            if len(t) > 18 or "[icon]" in t:
+                continue
+            best, bestdy = None, near
+            for ic in icons:
+                dy = it["y"] - ic["y"]  # icon above label => positive
+                if 0 < dy < bestdy and abs(ic["x"] - it["x"]) < col:
+                    best, bestdy = ic, dy
+            if best is not None:
+                it["x"], it["y"] = best["x"], best["y"]
+        items.extend(icons)
         geom = {"pos": pos, "size": size, "titlebar": self.titlebar_px,
                 "px_w": int(ocr.get("w") or 0), "px_h": int(ocr.get("h") or 0)}
         return items, frame, geom
@@ -768,12 +1048,14 @@ class LatchDriver:
         span = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}[direction]
         dx = span[0] * size[0] * distance
         dy = span[1] * size[1] * distance
-        x2 = min(max(x + dx, pos[0] + 4), pos[0] + size[0] - 4)
-        y2 = min(max(y + dy, pos[1] + 4), pos[1] + size[1] - 4)
         self.commands.append(("swipe_from", x, y, direction))
         self._ensure_ocr()
         self._focus()
-        src = 'do shell script "%s %d %d %d %d 320"' % (DRAG_BIN, int(x), int(y), int(x2), int(y2))
+        # Trackpad-style scroll, not a mouse drag: the drag grabs videos and
+        # selects text; a scroll-wheel gesture with phase + momentum flicks the
+        # feed the way a finger does. dx/dy is the finger movement; content
+        # follows it, and pf_scroll amplifies to real content distance.
+        src = 'do shell script "%s %d %d %d %d 220"' % (SCROLL_BIN, int(x), int(y), int(dx), int(dy))
         self.scripts.append(src)
         self._applescript(src)
 
@@ -791,6 +1073,28 @@ class LatchDriver:
         src = 'tell application "System Events" to key code %d using command down' % codes[button]
         self.scripts.append(src)
         self._applescript(src)
+
+    def reset_app(self, app: str) -> None:
+        """Force-quit the foreground app and reopen it — the way out of a stuck
+        screen (a video opened by mistake, a wedged view). Opens the app
+        switcher, swipes the centred card up to close it, then relaunches.
+        """
+        self.commands.append(("reset_app", app))
+        self.system_key("app_switcher")
+        time.sleep(0.6)
+        _, _, pos, size = self._window()
+        cx = int(pos[0] + size[0] * 0.5)
+        top = pos[1] + self.titlebar_px
+        y1 = int(top + (size[1] - self.titlebar_px) * 0.65)
+        y2 = int(top + (size[1] - self.titlebar_px) * 0.10)
+        self._focus()
+        src = 'do shell script "%s %d %d %d %d 400"' % (DRAG_BIN, cx, y1, cx, y2)
+        self.scripts.append(src)
+        self._applescript(src)
+        time.sleep(0.4)
+        self.system_key("home")
+        time.sleep(0.3)
+        self.open_app(app)
 
     def back(self) -> None:
         """The iOS back gesture: a swipe in from the left edge.
@@ -831,6 +1135,19 @@ class LatchDriver:
             raise err
         self.tap_point(inside[0]["x"], inside[0]["y"])
 
+    def drag(self, x1: float, y1: float, x2: float, y2: float, duration_ms: int = 600) -> None:
+        """A sustained press-and-move between two screen points — for reordering
+        icons, dragging a slider, or drag-and-drop. Unlike a scroll this keeps
+        the button down, so it uses the mouse-drag helper, not pf_scroll.
+        """
+        self.commands.append(("drag", x1, y1, x2, y2))
+        self._ensure_ocr()
+        self._focus()
+        src = 'do shell script "%s %d %d %d %d %d"' % (
+            DRAG_BIN, int(x1), int(y1), int(x2), int(y2), max(duration_ms, 200))
+        self.scripts.append(src)
+        self._applescript(src)
+
     def swipe(self, frm: dict, to: dict, duration_ms: int) -> None:
         _, _, pos, size = self._window()
 
@@ -841,12 +1158,11 @@ class LatchDriver:
         x2, y2 = _abs(to)
         self.commands.append(("swipe", frm, to, duration_ms))
         self._focus()  # an unfocused window eats the press, same as taps
-        # AppleScript-ObjC cannot hand a CGEventRef to CGEventPost (it fails to
-        # coerce to {__CGEvent=}), so the inline drag script silently exited 1
-        # and every scroll was a no-op. The Swift helper does the real drag.
         self._ensure_ocr()
+        # Trackpad scroll from the midpoint; the finger delta is (to - from).
+        mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         src = 'do shell script "%s %d %d %d %d %d"' % (
-            DRAG_BIN, int(x1), int(y1), int(x2), int(y2), max(duration_ms, 200))
+            SCROLL_BIN, int(mx), int(my), int(x2 - x1), int(y2 - y1), max(duration_ms, 200))
         self.scripts.append(src)
         self._applescript(src)
 

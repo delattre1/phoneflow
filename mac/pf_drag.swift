@@ -23,6 +23,9 @@ let ms = isClick ? 0.0 : (Double(a[5]) ?? 300.0)
 
 let src = CGEventSource(stateID: .hidSystemState)
 
+// Where the owner's pointer was before we hijack it, so we can put it back.
+let origin = CGEvent(source: nil)?.location ?? CGPoint(x: x1, y: y1)
+
 func post(_ type: CGEventType, _ x: Double, _ y: Double) {
     CGEvent(mouseEventSource: src, mouseType: type,
             mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)?
@@ -41,6 +44,11 @@ if isClick {
     // duration, so the only difference from a tap is how long the button is down.
     usleep(useconds_t(max(holdMs, 60.0) * 1000))
     post(.leftMouseUp, x1, y1)
+    // Return the pointer to where the owner left it (see `origin`), so the agent
+    // does not leave the cursor sitting on the phone window between actions.
+    usleep(useconds_t(20_000))
+    CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+            mouseCursorPosition: origin, mouseButton: .left)?.post(tap: .cghidEventTap)
     print("OK")
     exit(0)
 }
@@ -57,4 +65,7 @@ for i in 1...steps {
     usleep(useconds_t(perStep * 1000))
 }
 post(.leftMouseUp, x2, y2)
+usleep(useconds_t(20_000))
+CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
+        mouseCursorPosition: origin, mouseButton: .left)?.post(tap: .cghidEventTap)
 print("OK")
