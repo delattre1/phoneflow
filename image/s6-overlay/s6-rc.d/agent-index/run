@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/command/with-contenv sh
 # Report this agent's token usage to the Agent Index, every 5 minutes.
 #
 # NO SWITCH. The reporter is here because somebody put it in this image, and

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/command/with-contenv sh
 PATH=/command:/usr/local/bin:/usr/bin:/bin
 export PATH
 export PYTHONPATH=/opt/phoneflow
