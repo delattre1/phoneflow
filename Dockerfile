@@ -18,6 +18,7 @@ COPY pf_api/    /opt/phoneflow/pf_api/
 COPY pf_mirror/ /opt/phoneflow/pf_mirror/
 COPY --from=web /web/dist/ /opt/phoneflow/web/
 COPY workflows/ /opt/phoneflow/workflows/
+COPY app_hints/ /opt/phoneflow/app_hints/
 
 RUN find /opt/hermes/skills -mindepth 1 -type d -exec chmod 0755 {} + \
  && find /opt/hermes/skills -mindepth 1 -type f ! -perm -u+x -exec chmod 0644 {} + \
