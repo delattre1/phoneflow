@@ -525,24 +525,19 @@ def screenshot_command() -> list[str]:
 
 
 def open_app_script(app: str) -> str:
-    key_bin = KEY_BIN
     # Typing alone does nothing: the iPhone has to be on the home screen with
     # Spotlight open first. iPhone Mirroring maps Cmd-1 to Home and Cmd-3 to
     # Spotlight (key codes 18 and 20), so the sequence is Home, Spotlight, type,
     # Return. Without the first two the keystrokes land on whatever the phone
     # was already showing and the app never opens.
     return f'''
-tell application "iPhone Mirroring" to activate
-delay 0.4
 tell application "System Events"
-  set frontmost of application process "iPhone Mirroring" to true
-  delay 0.3
   key code 18 using command down -- Cmd-1: Home Screen
   delay 1.6
   key code 20 using command down -- Cmd-3: Spotlight
-  delay 1.8
-  do shell script "{key_bin} " & quoted form of "{app}"
-  delay 2.2
+  delay 1.6
+  keystroke "{app}"
+  delay 2.0
   key code 36 -- Return
   delay 2.5 -- let the app finish launching before the next frame
 end tell
@@ -823,8 +818,6 @@ class LatchDriver:
         into whatever the owner happened to have in front.
         """
         src = (
-            'tell application "iPhone Mirroring" to activate\n'
-            'delay 0.25\n'
             'tell application "System Events" to set frontmost of '
             'application process "iPhone Mirroring" to true'
         )
@@ -1251,14 +1244,14 @@ class LatchDriver:
 
     def type_text(self, text: str) -> None:
         self.commands.append(("type_text", text))
-        self._ensure_ocr()
-        self._focus()
-        # Real CGEvent key events (pf_key), not System Events keystroke, which
-        # the mirror drops — the field would stay empty. See pf_key.swift.
-        src = 'do shell script "%s " & quoted form of %s' % (KEY_BIN, json.dumps(text))
+        src = f'''
+tell application "System Events"
+  keystroke {json.dumps(text)}
+end tell
+'''
         self.scripts.append(src)
+        self._focus()
         self._applescript(src)
-
     def vault_fill(self, vault_item_id: str) -> str:
         # spec §11: the fill is manual; the owner completes the Mac auth prompt
         # and then Approves in the canvas.
