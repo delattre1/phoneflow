@@ -10,7 +10,7 @@ works, with no per-task setup and nothing installed on the phone.
 > "Open TikTok, check the For You page, and give me the vibe of the top 3 videos."
 
 - **Demo video:** https://youtu.be/lNcYfMMRJqw
-- **Agent Index:** https://aiworthusing.com/agent-index
+- **Agent Index page:** https://aiworthusing.com/agent-index/phoneflow-agent
 - **License:** MIT (see [LICENSE](LICENSE)).
 - **Guia em português:** [docs/INSTALL.pt-BR.md](docs/INSTALL.pt-BR.md) ·
   English long form: [docs/INSTALL.md](docs/INSTALL.md).
@@ -109,6 +109,16 @@ docker compose up --build -d
 `plow-credentials` is git-ignored and is mounted into the container through
 `env_file`. Never commit it.
 
+> **Keep this file safe. It is your agent's identity.** Your Agent Index page
+> belongs to the Plow agent that first published it. `plow-agents mint` always
+> creates a **new** agent, so revoking and minting again locks you out of your
+> own page for good. To replace a credential use **`plow-agents rotate`**, which
+> keeps the same agent. Back the file up right after minting:
+> ```sh
+> mkdir -p ~/.config/plow/backups && chmod 700 ~/.config/plow/backups
+> cp -p plow-credentials ~/.config/plow/backups/phoneflow-plow-credentials.$(date +%Y%m%d)
+> ```
+
 The first build needs network access. The Dockerfile fetches the pinned Agent
 Index client named in [`vendor/client.pin`](vendor/client.pin), checks its
 SHA-256, and fails the build on a mismatch.
@@ -159,7 +169,7 @@ reports usage every 5 minutes. To register by hand:
 
 ```sh
 docker compose exec agent /opt/hermes/.venv/bin/python3 /opt/plow/agent-index-client.py \
-  --register --agent phoneflow \
+  --register --agent phoneflow-agent \
   --name "PhoneFlow" \
   --blurb "Send a phone task; it runs on my iPhone via Latch + iPhone Mirroring." \
   --runtime "Hermes"

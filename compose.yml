@@ -5,7 +5,7 @@ services:
     ports:
       - "0.0.0.0:8788:8787"
     environment:
-      AGENT_ID: phoneflow
+      AGENT_ID: phoneflow-agent
       PHONEFLOW_DRIVER: latch
       # agent.task nodes need this; graph-only workflows run without it.
       PHONEFLOW_LLM_API_KEY: ${PHONEFLOW_LLM_API_KEY:-}

@@ -69,6 +69,12 @@ export PHONEFLOW_AGENT_MODEL=glm-5.3-flash    # default planner (kimi-k3 for har
 docker compose up --build -d
 ```
 
+> **Keep `plow-credentials` safe — it is your agent's identity.** Your Agent Index
+> page belongs to the Plow agent that first published it, and `plow-agents mint`
+> always creates a **new** agent. Never revoke and mint again: use
+> **`plow-agents rotate`** to replace a credential, and back the file up
+> (`cp -p plow-credentials ~/.config/plow/backups/`).
+
 The first build needs network access (it fetches the pinned Agent Index
 client). Verify the API is up:
 
@@ -149,7 +155,7 @@ Register PhoneFlow in the Plow Agent Index so your Plow agent can reach it:
 
 ```sh
 docker compose exec agent /opt/hermes/.venv/bin/python3 \
-  /opt/plow/agent-index-client.py --register --agent phoneflow \
+  /opt/plow/agent-index-client.py --register --agent phoneflow-agent \
   --name "PhoneFlow" \
   --blurb "Send a phone task; it runs on my iPhone via Latch + iPhone Mirroring." \
   --runtime "Hermes"
