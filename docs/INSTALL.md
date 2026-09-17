@@ -30,15 +30,18 @@ no per-task setup.
   one on the same network.
 - The **iPhone** is driven while **locked**, through iPhone Mirroring.
 
-**Security:** LAN only — never publish port 8788 to the internet. Banking,
-wallet and password apps are blocked by default.
+**Security:** LAN only — never publish port 8788 to the internet. The agent's
+persona tells it never to act on banking, wallet or password apps. That is an
+instruction, not a hard block: for an enforced refusal, list the app names in
+`PHONEFLOW_BLOCKED_APPS`, which is empty by default.
 
 ## What you need
 
 - **Agent host:** Docker + the docker compose plugin, and the
   [`plow-agents`](https://github.com/plow-pbc/plow-agents) tooling.
-- **Mac:** macOS 15+ (Apple Silicon), Plow **Latch**, and **iPhone Mirroring**
-  paired with your iPhone.
+- **Mac:** macOS 15+ (Apple Silicon), Plow **Latch**, **iPhone Mirroring**
+  paired with your iPhone, and the **Xcode Command Line Tools**
+  (`xcode-select --install`) — the Mac helpers are compiled with `swiftc`.
 - **An LLM key** for an OpenAI-compatible endpoint (the planner). The default
   endpoint is `https://ollama.com/v1` and the default model is `glm-5.3-flash` (set `PHONEFLOW_AGENT_MODEL=kimi-k3` for tougher reasoning).
 
@@ -51,8 +54,8 @@ wallet and password apps are blocked by default.
 git clone https://github.com/plow-pbc/plow-agents ~/plow-agents
 export PATH="$HOME/plow-agents/bin:$PATH"
 
-git clone <this-repo> ~/phoneflow-hermes-agent
-cd ~/phoneflow-hermes-agent
+git clone https://github.com/visued/phoneflow ~/phoneflow
+cd ~/phoneflow
 
 plow-agents login          # authenticate to Plow
 plow-agents lines          # list your lines
@@ -79,16 +82,38 @@ curl -sf http://<host>:8788/api/health
 1. Install and open **Plow Latch**; leave it running.
 2. Open **iPhone Mirroring** and pair it with your iPhone. Keep the mirror
    window visible on the **home screen**.
-3. Grant macOS permissions **to Latch**: System Settings → Privacy & Security →
-   **Accessibility** and **Screen Recording**. After granting Screen Recording,
-   **quit and reopen Latch** so it picks the grant up.
+3. Grant macOS permissions **to Latch** in System Settings → Privacy & Security:
+   - **Screen Recording** — screenshots of the mirror window. Without it every
+     frame is blank.
+   - **Accessibility** — real clicks, drags, scrolls and key presses.
+   - **Automation → System Events** — finding and focusing the mirror window and
+     pressing the Home, App Switcher and Spotlight shortcuts. macOS asks the
+     first time; answer **OK**.
+
+   After granting Screen Recording, **quit and reopen Latch** so it picks the
+   grant up. The helpers run as children of Latch and inherit these grants.
 4. Keep the iPhone **locked** — iPhone Mirroring only drives a locked phone (the
    Mac session acts unlocked). If you unlock the phone, the mirror disconnects.
 
 When both are running, `/api/health` reports `latch: "up"`.
 
-The Mac-side helpers (`pf_ocr`, `pf_drag`, `pf_scroll`) compile themselves on
-first use through Latch — no manual step, ~a minute once.
+## The Mac helpers
+
+iPhone Mirroring ignores most synthetic input, so PhoneFlow ships small helpers
+that run on the Mac. **You never install them by hand.** On first use the driver
+writes each source to `~/.phoneflow/` through Latch, compiles it with
+`xcrun swiftc -O`, and stores a hash of the source next to the binary. When a
+helper changes in the repo, it is rebuilt automatically. The first run costs
+about a minute.
+
+| Helper | What it does |
+|---|---|
+| `pf_observe.sh` | **The screenshot helper.** One call captures the screen, crops the mirror window, upscales it, runs OCR and icon detection, and returns one JSON object with the recognised text and a base64 JPEG frame. It replaced about 14 round trips per step. |
+| `pf_ocr` | macOS Vision text recognition, with the position of every line. |
+| `pf_icons` | Local CoreML icon detector. Used only when the model from Part 3 is installed. |
+| `pf_drag` | Real mouse events: click, long press and drag. |
+| `pf_scroll` | Trackpad-style scroll gesture with momentum, so feeds flick to the next page. |
+| `pf_key` | Types text with real key codes, which is what iPhone Mirroring forwards. |
 
 ## Part 3 — Icon detection model (recommended)
 
@@ -157,8 +182,9 @@ The agent replies with what it found (e.g. the post text, the titles).
   click the mirror (iPhone Mirroring only reacts to real mouse events); it
   returns the cursor after each click, but you cannot use the mouse at the same
   time.
-- **Blocked apps.** Set `PHONEFLOW_BLOCKED_APPS="C6,Nubank,Wallet"` to refuse
-  more apps by name.
+- **Blocked apps.** The list is empty by default. Set
+  `PHONEFLOW_BLOCKED_APPS="C6,Nubank,Wallet"` to make the agent refuse apps by
+  name (case-insensitive substring match).
 - **No phone-side setup.** No Developer Mode, no WebDriverAgent, no signing — just
   iPhone Mirroring. That is also why banking apps that block automation may not
   work, and why nothing needs weekly re-signing.
