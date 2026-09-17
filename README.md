@@ -9,7 +9,7 @@ works, with no per-task setup and nothing installed on the phone.
 
 > "Open TikTok, check the For You page, and give me the vibe of the top 3 videos."
 
-- **Demo video:** https://youtu.be/lNcYfMMRJqw
+- **Demo video:** https://youtu.be/WYJslTJd-8g
 - **Agent Index page:** https://aiworthusing.com/agent-index/phoneflow-agent
 - **License:** MIT (see [LICENSE](LICENSE)).
 - **Guia em português:** [docs/INSTALL.pt-BR.md](docs/INSTALL.pt-BR.md) ·
