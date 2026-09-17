@@ -215,3 +215,50 @@ def test_events_sse_streams_existing_then_terminal_close(tmp_path):
         assert evs[1]["code"] == "awaiting_confirm"
     finally:
         httpd.shutdown()
+
+
+def test_async_run_returns_at_once_and_is_pollable(tmp_path):
+    import time
+    httpd, port, _ = _boot(tmp_path)
+    try:
+        c = HTTPConnection("127.0.0.1", port)
+        c.request("PUT", "/api/workflows/wf_settings_general", json.dumps(SETTINGS), {"Content-Type": "application/json"})
+        c.getresponse().read()
+        c.request("POST", "/api/runs", json.dumps({"workflowId": "wf_settings_general", "async": True}), {"Content-Type": "application/json"})
+        resp = c.getresponse()
+        started = json.loads(resp.read())
+        assert resp.status == 202 and started["status"] == "running"
+        status = None
+        for _ in range(100):
+            c.request("GET", f"/api/runs/{started['runId']}")
+            status = json.loads(c.getresponse().read())["status"]
+            if status != "running":
+                break
+            time.sleep(0.05)
+        assert status == "succeeded"
+    finally:
+        httpd.shutdown()
+
+
+def test_second_run_is_refused_while_one_holds_the_phone(tmp_path):
+    httpd, port, _ = _boot(tmp_path)
+    try:
+        c = HTTPConnection("127.0.0.1", port)
+        for wf in (CONFIRM, SETTINGS):
+            c.request("PUT", f"/api/workflows/{wf['id']}", json.dumps(wf), {"Content-Type": "application/json"})
+            c.getresponse().read()
+        c.request("POST", "/api/runs", json.dumps({"workflowId": "wf_confirm_park"}), {"Content-Type": "application/json"})
+        parked = json.loads(c.getresponse().read())
+        assert parked["status"] == "awaiting_confirm"
+        c.request("POST", "/api/runs", json.dumps({"workflowId": "wf_settings_general"}), {"Content-Type": "application/json"})
+        resp = c.getresponse()
+        body = json.loads(resp.read())
+        assert resp.status == 409 and body["code"] == "busy" and body["runId"] == parked["runId"]
+        # cancelling the holder frees the phone
+        c.request("POST", f"/api/runs/{parked['runId']}/cancel", "{}", {"Content-Type": "application/json"})
+        c.getresponse().read()
+        c.request("POST", "/api/runs", json.dumps({"workflowId": "wf_settings_general"}), {"Content-Type": "application/json"})
+        resp = c.getresponse()
+        assert resp.status == 200 and json.loads(resp.read())["status"] == "succeeded"
+    finally:
+        httpd.shutdown()

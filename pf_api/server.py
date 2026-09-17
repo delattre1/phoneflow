@@ -11,6 +11,7 @@ deployers on hostile LANs SHOULD pin PHONEFLOW_ORIGIN.
 from __future__ import annotations
 
 import json
+import threading
 import mimetypes
 import os
 import re
@@ -174,6 +175,11 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             if run is None:
                 self._send(404, {"code": "not_found", "message": "run not found"})
                 return
+            live = self.server.interpreters.get(m.group(1))
+            if live is not None and run.get("status") != "running":
+                result = self._outcome(live, m.group(1)).get("result")
+                if result:
+                    run = dict(run, result=result)
             self._send(200, run)
             return
         self._send(404, {"code": "not_found", "message": "no such route"})
@@ -295,6 +301,15 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             if doc is None:
                 self._send(404, {"code": "not_found", "message": "workflow not found"})
                 return
+        # One phone, one run. Two runs fight over the same mirror window and the
+        # same cursor, and a caller that timed out and retried would publish or
+        # send twice. The caller gets the id of the run that holds the phone so
+        # it can poll that one instead.
+        for busy_id, busy in list(self.server.interpreters.items()):
+            if busy.run and busy.run.get("status") in ("running", "awaiting_confirm"):
+                self._send(409, {"code": "busy", "runId": busy_id,
+                                 "message": "a run is already using the phone; poll it, do not start another"})
+                return
         run_id = new_run_id()
         save_run(
             self._home(),
@@ -314,11 +329,28 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
         run = itp.start(doc)
         run["id"] = run_id
         self._persist(itp)  # running state observable while the run executes
-        while run["status"] == "running":
+        if isinstance(body, dict) and body.get("async") is True:
+            # A phone task takes minutes; a chat agent's HTTP tool gives up long
+            # before that, reads the dropped call as a failure and retries. So the
+            # run goes to a thread and the caller polls GET /api/runs/{id}.
+            threading.Thread(target=self._drive, args=(itp, run_id), daemon=True).start()
+            self._send(202, {"runId": run_id, "status": "running"})
+            return
+        self._drive(itp, run_id)
+        self._send(200, self._outcome(itp, run_id))
+
+    def _drive(self, itp: Interpreter, run_id: str) -> None:
+        """Tick a run to its end, persisting as it goes. Stops if it was cancelled."""
+        run = itp.run
+        while run["status"] == "running" and self.server.interpreters.get(run_id) is itp:
             run = itp.tick()
             if run["status"] == "running":
                 self._persist(itp)
-        self._persist(itp)
+        if self.server.interpreters.get(run_id) is itp:
+            self._persist(itp)
+
+    @staticmethod
+    def _outcome(itp: Interpreter, run_id: str) -> dict:
         out = {"runId": run_id, "status": itp.run.get("status") if itp.run else None}
         results = getattr(itp, "agent_results", None)
         if results:
@@ -328,7 +360,7 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
                 "message": last.get("message"),
                 "records": last.get("records"),
             }
-        self._send(200, out)
+        return out
 
     def _confirm(self, run_id: str) -> None:
         itp = self.server.interpreters.get(run_id)
