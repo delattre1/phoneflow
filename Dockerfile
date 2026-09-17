@@ -6,7 +6,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM public.ecr.aws/e1h7x4a2/plow-cloud-agents:base-8088c7f77f5ffd536a80c9dc302ebdb39e6be1d2@sha256:26d69e81faebc584a4d819f68f756e2d4917938409b0f8ff98488c93bdd34b78
+FROM public.ecr.aws/e1h7x4a2/plow-cloud-agents:base-910b8e3ba8980e20faae9f37dcaca0ea9d8bd9ae@sha256:f4739b6e74309dcccd087792949fd613191db7f33d33109c78127684dcb5dd73
 
 COPY --chmod=0644 runtime/persona.md /opt/hermes/plow-seed/persona.md
 COPY LICENSE /usr/share/doc/phoneflow/LICENSE
@@ -14,6 +14,9 @@ COPY LICENSE /usr/share/doc/phoneflow/LICENSE
 COPY pf-run/    /opt/hermes/skills/pf-run/
 COPY pf-mirror/ /opt/hermes/skills/pf-mirror/
 COPY pf-setup/  /opt/hermes/skills/pf-setup/
+COPY --chown=10000:10000 pf-run/    /var/lib/hermes/skills/pf-run/
+COPY --chown=10000:10000 pf-mirror/ /var/lib/hermes/skills/pf-mirror/
+COPY --chown=10000:10000 pf-setup/  /var/lib/hermes/skills/pf-setup/
 COPY pf_api/    /opt/phoneflow/pf_api/
 COPY pf_mirror/ /opt/phoneflow/pf_mirror/
 COPY --from=web /web/dist/ /opt/phoneflow/web/
