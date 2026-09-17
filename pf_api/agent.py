@@ -113,6 +113,11 @@ Rules:
   and report only recorded items. If you were asked to gather items and have none
   recorded, call `give_up` — inventing a plausible answer is a serious failure,
   worse than admitting you could not complete the task.
+- To launch an app, ALWAYS use `open_app` — it opens Spotlight, types the name
+  and launches it in one reliable step. Never open Spotlight yourself and then
+  `type_text` the name: that manual typing frequently fails to register. If the
+  app is already visible as an icon, tapping the icon is fine, but prefer
+  `open_app` for launching by name.
 - To open an app, call `open_app` once and wait. If it does not come up full
   screen — you still see the home screen, a Spotlight search box, or a small
   floating video / mini-player — do NOT tap launch icons repeatedly. Call

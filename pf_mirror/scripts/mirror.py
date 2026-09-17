@@ -188,6 +188,43 @@ CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
 print("OK")
 """
 
+KEY_SWIFT = r"""// PhoneFlow keyboard — types text into iPhone Mirroring with REAL key events.
+//
+// System Events `keystroke "..."` posts synthetic character events that iPhone
+// Mirroring drops (its Spotlight field stays empty), the same way it ignored a
+// synthetic mouse click. Raw `key code` events do reach it — that is how Cmd-1
+// and Cmd-3 work — so text is typed here as real CGEvent key events carrying a
+// Unicode string, which the mirror forwards to the phone like a hardware
+// keyboard. The window must already be frontmost (the driver focuses it first).
+//
+// usage: pf_key <text>
+import Foundation
+import CoreGraphics
+
+let args = CommandLine.arguments
+guard args.count >= 2 else {
+    FileHandle.standardError.write("usage: pf_key <text>\n".data(using: .utf8)!)
+    exit(2)
+}
+let text = args[1]
+let src = CGEventSource(stateID: .hidSystemState)
+
+for ch in text.utf16 {
+    var unichar = ch
+    if let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true) {
+        down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
+        down.post(tap: .cghidEventTap)
+    }
+    usleep(4_000)
+    if let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) {
+        up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
+        up.post(tap: .cghidEventTap)
+    }
+    usleep(12_000) // a hair between characters so the field keeps up
+}
+print("OK")
+"""
+
 SCROLL_SWIFT = r"""// PhoneFlow scroll — a trackpad-style scroll gesture, not a mouse drag.
 //
 // iPhone Mirroring reacts to real trackpad scroll semantics, not to a pressed
@@ -418,6 +455,7 @@ OBSERVE_SH = OCR_DIR + "/pf_observe.sh"
 DRAG_BIN = OCR_DIR + "/pf_drag"
 ICONS_BIN = OCR_DIR + "/pf_icons"
 SCROLL_BIN = OCR_DIR + "/pf_scroll"
+KEY_BIN = OCR_DIR + "/pf_key"
 # Owner-supplied CoreML icon detector (OmniParser icon_detect or similar).
 ICON_MODEL = OCR_DIR + "/icon_detect.mlpackage"
 _UNSET = object()
@@ -451,19 +489,24 @@ def screenshot_command() -> list[str]:
 
 
 def open_app_script(app: str) -> str:
+    key_bin = KEY_BIN
     # Typing alone does nothing: the iPhone has to be on the home screen with
     # Spotlight open first. iPhone Mirroring maps Cmd-1 to Home and Cmd-3 to
     # Spotlight (key codes 18 and 20), so the sequence is Home, Spotlight, type,
     # Return. Without the first two the keystrokes land on whatever the phone
     # was already showing and the app never opens.
     return f'''
+tell application "iPhone Mirroring" to activate
+delay 0.4
 tell application "System Events"
+  set frontmost of application process "iPhone Mirroring" to true
+  delay 0.3
   key code 18 using command down -- Cmd-1: Home Screen
   delay 1.6
   key code 20 using command down -- Cmd-3: Spotlight
-  delay 1.6
-  keystroke "{app}"
-  delay 2.0
+  delay 1.8
+  do shell script "{key_bin} " & quoted form of "{app}"
+  delay 2.2
   key code 36 -- Return
   delay 2.5 -- let the app finish launching before the next frame
 end tell
@@ -744,6 +787,8 @@ class LatchDriver:
         into whatever the owner happened to have in front.
         """
         src = (
+            'tell application "iPhone Mirroring" to activate\n'
+            'delay 0.25\n'
             'tell application "System Events" to set frontmost of '
             'application process "iPhone Mirroring" to true'
         )
@@ -754,6 +799,7 @@ class LatchDriver:
         src = open_app_script(app)
         self.commands.append(("open_app", app))
         self.scripts.append(src)
+        self._ensure_ocr()  # builds pf_key, used to type the app name
         self._focus()
         self._applescript(src)
 
@@ -805,6 +851,7 @@ class LatchDriver:
             (DRAG_BIN, OCR_DIR + "/pf_drag.swift", DRAG_SWIFT),
             (ICONS_BIN, OCR_DIR + "/pf_icons.swift", ICONS_SWIFT),
             (SCROLL_BIN, OCR_DIR + "/pf_scroll.swift", SCROLL_SWIFT),
+            (KEY_BIN, OCR_DIR + "/pf_key.swift", KEY_SWIFT),
         ):
             # Keyed on the source, not on the binary's existence: a Mac that
             # built an earlier pf_ocr would otherwise keep it forever, and a
@@ -1168,13 +1215,12 @@ class LatchDriver:
 
     def type_text(self, text: str) -> None:
         self.commands.append(("type_text", text))
-        src = f'''
-tell application "System Events"
-  keystroke {json.dumps(text)}
-end tell
-'''
-        self.scripts.append(src)
+        self._ensure_ocr()
         self._focus()
+        # Real CGEvent key events (pf_key), not System Events keystroke, which
+        # the mirror drops — the field would stay empty. See pf_key.swift.
+        src = 'do shell script "%s " & quoted form of %s' % (KEY_BIN, json.dumps(text))
+        self.scripts.append(src)
         self._applescript(src)
 
     def vault_fill(self, vault_item_id: str) -> str:
