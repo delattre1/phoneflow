@@ -1,91 +1,215 @@
 # PhoneFlow
 
-Draw iPhone chores on a canvas; Hermes runs them through Plow Latch and
-iPhone Mirroring on a nearby Mac.
+**Text it. It runs your iPhone.**
 
-- **Install guide (new users):** [English](docs/INSTALL.md) · [Português](docs/INSTALL.pt-BR.md).
+PhoneFlow is a Hermes agent that controls a real iPhone from iMessage. You text
+a plain-language task, the agent drives the phone through Plow Latch and iPhone
+Mirroring on your Mac, and the answer comes back in the same thread. Any app
+works, with no per-task setup and nothing installed on the phone.
+
+> "Open TikTok, check the For You page, and give me the vibe of the top 3 videos."
+
+- **Demo video:** <YOUTUBE URL>
+- **Agent Index:** https://aiworthusing.com/agent-index
 - **License:** MIT (see [LICENSE](LICENSE)).
-- **Network:** LAN only. The API listens on **host port `8788`** (container
-  stays 8787) so any device on the home network can open the canvas.
-  **Never publish port 8788 to the internet.**
+- **Guia em português:** [docs/INSTALL.pt-BR.md](docs/INSTALL.pt-BR.md) ·
+  English long form: [docs/INSTALL.md](docs/INSTALL.md).
 
-## Topology
+## How it fits together
 
 ```
-┌──────────────────┐  canvas / API   ┌────────────────────┐
-│  suedpc.local    │◄───────────────►│  your Mac          │
-│  docker compose  │  :8788 (LAN)    │  Latch             │
-│  PhoneFlow agent │                 │  iPhone Mirroring  │
-└──────────────────┘                 └────────────────────┘
-        │                                     │
-        └────────── runs phone actions ───────┘
+┌──────────────────────┐   LAN, :8788    ┌──────────────────────────┐
+│  Agent host (Docker) │◄───────────────►│  Your Mac (Apple Silicon)│
+│  PhoneFlow + Hermes  │                 │  Plow Latch              │
+│  the planner brain   │                 │  iPhone Mirroring        │
+└──────────────────────┘                 └──────────┬───────────────┘
+                                                     │ locked iPhone,
+                                                     ▼ mirror window open
+                                              ┌────────────┐
+                                              │  iPhone    │
+                                              └────────────┘
 ```
 
-- **suedpc.local** hosts the PhoneFlow agent in Docker and serves the canvas
-  at `http://suedpc.local:8788`.
-- **Your Mac** runs Plow Latch and iPhone Mirroring; the agent's phone
-  actions (tap, type, screenshot, app open) execute there through Latch's
-  Accessibility + Screen Recording permissions.
+- The **agent host** runs PhoneFlow in Docker and holds the planner. It can be
+  a Linux box or the Mac itself.
+- **Your Mac** runs Plow **Latch** and **iPhone Mirroring**. Every screenshot,
+  tap, scroll and keystroke happens there.
+- The **iPhone** is driven while **locked**, through iPhone Mirroring.
 
-## Install on suedpc
+**Security:** LAN only. The API listens on host port `8788` (the container
+stays on 8787). **Never publish port 8788 to the internet.**
 
-Prerequisites: Docker + docker compose plugin, and
-[`plow-agents`](https://github.com/plow-pbc/plow-agents) from the Plow tooling.
+The agent's persona tells it never to act on banking, wallet or password apps.
+That is an instruction, not a hard block. For an enforced refusal, list the app
+names in `PHONEFLOW_BLOCKED_APPS`, which is empty by default.
+
+## Requirements
+
+| Where | What |
+|---|---|
+| Agent host | Docker with the compose plugin, and the [`plow-agents`](https://github.com/plow-pbc/plow-agents) tooling |
+| Mac | macOS 15 or later on Apple Silicon, Plow **Latch**, **iPhone Mirroring** paired with the iPhone, Xcode Command Line Tools |
+| iPhone | Any iPhone that supports iPhone Mirroring, signed in to the same Apple Account as the Mac |
+| Accounts | A Plow account with a line, and an API key for an OpenAI-compatible LLM endpoint |
+
+## Install, step by step
+
+### Step 1. Prepare the Mac
+
+1. **Install the Xcode Command Line Tools.** PhoneFlow compiles its small Swift
+   helpers on the Mac with `swiftc`, so the tools must be present:
+   ```sh
+   xcode-select --install
+   ```
+2. **Install Plow Latch**, open it, sign in, and leave it running. Latch is the
+   bridge the agent uses to run actions on your Mac.
+3. **Pair iPhone Mirroring.** Open the iPhone Mirroring app, pair it with your
+   iPhone, and leave the mirror window visible on the phone's **home screen**.
+   The window is titled `iPhone Mirroring` (or `Espelhamento do iPhone`).
+4. **Keep the iPhone locked.** iPhone Mirroring only drives a locked phone. If
+   you unlock the phone, the mirror disconnects.
+
+### Step 2. Grant macOS permissions to Latch
+
+Open **System Settings → Privacy & Security** and grant these to **Latch**:
+
+| Permission | Why PhoneFlow needs it |
+|---|---|
+| **Screen Recording** | Screenshots of the mirror window. Without it every frame is blank and the agent is blind. |
+| **Accessibility** | Real mouse clicks, drags, trackpad scrolls and key presses sent to the mirror window. |
+| **Automation → System Events** | Finding the mirror window, bringing it to the front, and pressing Home, App Switcher and Spotlight shortcuts. macOS asks for this the first time; answer **OK**. |
+
+Then **quit and reopen Latch**. A Screen Recording grant is only picked up after
+a restart. If you use `cliclick`, grant it Accessibility too.
+
+The Swift helpers run as children of Latch, so they inherit these grants. You
+do not need to add them one by one.
+
+### Step 3. Start the agent host
 
 ```sh
-# on suedpc.local
+# on the agent host
 git clone https://github.com/plow-pbc/plow-agents ~/plow-agents
 export PATH="$HOME/plow-agents/bin:$PATH"
-git clone <repo> ~/phoneflow-hermes-agent
-plow-agents login
-plow-agents lines
-plow-agents mint ln_xxx
-cd ~/phoneflow-hermes-agent
+
+git clone https://github.com/visued/phoneflow ~/phoneflow
+cd ~/phoneflow
+
+plow-agents login          # authenticate to Plow
+plow-agents lines          # list your lines
+plow-agents mint ln_xxx    # writes ./plow-credentials next to compose.yml
+
+export PHONEFLOW_LLM_API_KEY=...                       # your LLM key
+export PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # default
+export PHONEFLOW_AGENT_MODEL=glm-5.3-flash            # default planner
+
 docker compose up --build -d
 ```
 
-`plow-agents mint` writes `./plow-credentials` next to `compose.yml`; the
-compose file bind-mounts it read-only into the container so the agent can
-authenticate. **First build needs network access** — the Dockerfile fetches
-the pinned Agent Index client (`vendor/client.pin`) from GitHub and fails the
-build on a bad fetch.
+`plow-credentials` is git-ignored and is mounted into the container through
+`env_file`. Never commit it.
 
-Verify:
+The first build needs network access. The Dockerfile fetches the pinned Agent
+Index client named in [`vendor/client.pin`](vendor/client.pin), checks its
+SHA-256, and fails the build on a mismatch.
+
+### Step 4. Verify
 
 ```sh
-curl -sf http://suedpc.local:8788/api/health
+curl -sf http://<host>:8788/api/health
+# {"ok": true, "latch": "up"}
 ```
 
-## On the Mac
+`latch` stays `"down"` until Latch is open on the Mac. If it is down, stop and
+open Latch first.
 
-1. Install Plow **Latch** and open it (leave it running).
-2. Pair **iPhone Mirroring** with the iPhone and keep the mirroring window
-   visible.
-3. Grant macOS **Accessibility** and **Screen Recording** to Latch (and
-   `cliclick` if you use it).
-4. Open `http://suedpc.local:8788` in a browser.
+### Step 5. Icon detection model (optional, recommended)
 
-If `/api/health` reports `latch: "down"`, stop and open Latch first.
+Text OCR cannot see icons that carry no text, such as a magnifier, a bell or
+tab-bar glyphs. For those PhoneFlow can run a small local CoreML detector on the
+Mac. The model is **owner-supplied** and is not bundled. Install it once:
 
-## Screen reading (OCR)
+```sh
+# on the Mac
+pip3 install --user ultralytics huggingface_hub
+python3 - <<'PYEOF'
+from huggingface_hub import hf_hub_download
+from ultralytics import YOLO
+import shutil, os
+pt = hf_hub_download("microsoft/OmniParser-v2.0", "icon_detect/model.pt")
+shutil.copy(pt, "icon_detect.pt")
+YOLO("icon_detect.pt").export(format="coreml", imgsz=640, nms=True)
+os.makedirs(os.path.expanduser("~/.phoneflow"), exist_ok=True)
+shutil.rmtree(os.path.expanduser("~/.phoneflow/icon_detect.mlpackage"), ignore_errors=True)
+shutil.copytree("icon_detect.mlpackage", os.path.expanduser("~/.phoneflow/icon_detect.mlpackage"))
+print("installed ~/.phoneflow/icon_detect.mlpackage")
+PYEOF
+```
 
-`phone.tap` by label, `flow.if`, and every `agent.task` need to know what is on
-the phone. That comes from macOS Vision, run on the Mac: `mac/pf_ocr.swift` is
-compiled once to `~/.phoneflow/pf_ocr` and returns each recognised line with its
-screen coordinates. The driver builds it on first use, so no manual step is
-needed — the first call just costs about a minute while `swiftc` runs.
+> **License note:** OmniParser's `icon_detect` is **AGPL-3.0**. It is a
+> separate, owner-supplied component and is not redistributed with PhoneFlow,
+> which is MIT. Without it PhoneFlow still runs. It falls back to text OCR and a
+> cloud grounder for icons.
 
-Two constraints worth knowing, because they shaped the design:
+### Step 6. Register in the Agent Index
+
+The container self-registers on first boot: the baked-in `agent-index` service
+registers with `PLOW_AGENT_TOKEN` when it finds itself unregistered, then
+reports usage every 5 minutes. To register by hand:
+
+```sh
+docker compose exec agent /opt/hermes/.venv/bin/python3 /opt/plow/agent-index-client.py \
+  --register --agent phoneflow \
+  --name "PhoneFlow" \
+  --blurb "Send a phone task; it runs on my iPhone via Latch + iPhone Mirroring." \
+  --runtime "Hermes"
+```
+
+### Step 7. Use it
+
+With Latch up, the iPhone locked, and the mirror on the home screen:
+
+- **From iMessage**, text your Plow agent naturally:
+  - *"Open TikTok, check the For You page, and give me the vibe of the top 3 videos."*
+  - *"Open YouTube, go to the trending tab and tell me the first 3 video titles."*
+  - `run wf_youtube_trending` runs a workflow you drew in the canvas.
+- **From the canvas** at `http://<host>:8788`, draw a workflow and run it. The
+  canvas is optional for the iMessage flow.
+
+The agent replies with what it found.
+
+## The Mac helpers
+
+iPhone Mirroring ignores most synthetic input, so PhoneFlow ships a set of small
+helpers that run on the Mac. **You never install them by hand.** On first use
+the driver writes each source file to `~/.phoneflow/` through Latch, compiles it
+with `xcrun swiftc -O`, and stores a hash of the source next to the binary. When
+a helper changes in this repo, the hash no longer matches and it is rebuilt
+automatically. The first run costs about a minute while they compile.
+
+| Helper | What it does |
+|---|---|
+| [`pf_observe.sh`](mac/pf_observe.sh) | **The screenshot helper.** One call captures the screen, crops the mirror window, upscales it so small labels are readable, runs OCR and icon detection, and returns a single JSON object with the recognised text and a base64 JPEG frame. It replaced about 14 separate round trips through the Plow relay per step. |
+| [`pf_ocr.swift`](mac/pf_ocr.swift) | macOS Vision text recognition. Returns every line with its centre position, normalised to the image with a top-left origin. |
+| [`pf_icons.swift`](mac/pf_icons.swift) | Local CoreML icon detector for tappable icons with no text. Used only when the model from Step 5 is installed. No frame leaves the Mac. |
+| [`pf_drag.swift`](mac/pf_drag.swift) | Real CoreGraphics mouse events: click, long press and drag. |
+| [`pf_scroll.swift`](mac/pf_scroll.swift) | Trackpad-style scroll gesture with phases and a momentum tail, so feeds and carousels flick to the next page. A plain mouse drag does not work in the mirror. |
+| [`pf_key.swift`](mac/pf_key.swift) | Types text with real US-ANSI virtual key codes. iPhone Mirroring does not forward Unicode-only key events. |
+
+Two constraints shaped this design:
 
 - **Latch never returns binary file content.** `plow_read_file` inlines text but
-  answers only a byte count for a PNG, so the driver has the Mac write a base64
-  copy and reads that instead. Frames are JPEG for the same reason — size is
-  real cost on this path.
+  answers only a byte count for a PNG, so the Mac writes a base64 copy and the
+  driver reads that. Frames are JPEG for the same reason: size is real cost on
+  this path.
 - **`screencapture` cannot run under `plow_run_command`.** That path is
   sandboxed and the capture dies with exit -1. It goes through
-  `plow_run_applescript` instead, which runs outside the sandbox. Latch itself
-  needs macOS **Screen Recording** permission, and must be restarted after it is
-  granted.
+  `plow_run_applescript` instead, which runs outside the sandbox. This is why
+  Latch itself needs the Screen Recording permission.
+
+The agent also ships three Hermes skills: [`pf-setup`](pf-setup/SKILL.md) is the
+first-boot checklist, [`pf-run`](pf-run/SKILL.md) starts a run from chat, and
+[`pf-mirror`](pf-mirror/SKILL.md) drives the mirror window through Latch.
 
 ## Goal-driven nodes (`agent.task`)
 
@@ -110,7 +234,7 @@ Configure the model through the environment (any OpenAI-compatible endpoint):
 ```sh
 PHONEFLOW_LLM_API_KEY=...                      # required for agent.task only
 PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # default
-PHONEFLOW_AGENT_MODEL=kimi-k3                  # must support vision + tools
+PHONEFLOW_AGENT_MODEL=glm-5.3-flash            # default; must support vision + tools
 ```
 
 Graph-only workflows run without any of these. Try `wf_youtube_trending` first —
@@ -124,22 +248,44 @@ one real app name in the `phone.openApp` node before running "Get my agent
 verified" — as shipped, it just Spotlight-searches the literal `CHANGE_ME`
 and parks on a confirm.
 
-## Register the agent in the Agent Index
-```sh
-docker compose exec agent /opt/hermes/.venv/bin/python3 /opt/plow/agent-index-client.py \
-  --register --agent phoneflow \
-  --name "PhoneFlow" \
-  --blurb "Draw iPhone actions; Hermes runs them through Latch + iPhone Mirroring." \
-  --runtime "Hermes"
-```
+## Configuration
 
-The container also self-registers on first boot (the baked-in
-`agent-index` s6 service registers with `PLOW_AGENT_TOKEN` when it finds
-itself unregistered, then reports usage every 5 minutes). Manual
-registration above is the owner-driven path.
+Set these in the environment before `docker compose up`.
 
-## Smoke test
+| Variable | Default | Purpose |
+|---|---|---|
+| `PHONEFLOW_LLM_API_KEY` | none | Key for the planner. Required for plain-language tasks and `agent.task` nodes. |
+| `PHONEFLOW_LLM_BASE_URL` | `https://ollama.com/v1` | Any OpenAI-compatible endpoint. |
+| `PHONEFLOW_AGENT_MODEL` | `glm-5.3-flash` | Planner model. Must support vision and tools. Use `kimi-k3` for harder tasks. |
+| `PHONEFLOW_GROUNDER_MODEL` | `qwen3.5:397b` | Cloud grounder used for icons when the local model is absent. |
+| `PHONEFLOW_BLOCKED_APPS` | empty | Comma list of app names the agent must refuse, for example `"C6,Nubank,Wallet"`. Case-insensitive substring match. |
+| `MIRROR_TITLEBAR_PX` | `28` | Title bar height subtracted from window-local clicks. |
+| `PLOW_CREDENTIALS` | `./plow-credentials` | Path of the credential file minted by `plow-agents`. |
 
-Open the Settings playbook with iPhone Mirroring visible, run it from the
-canvas, and confirm the taps land on the mirrored iPhone. Then run the
-owner's real chore.
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `/api/health` says `latch: "down"` | Open Latch on the Mac and keep it running. |
+| Error `mirror_window_missing` | Open iPhone Mirroring and keep the window visible. |
+| Frames are black or empty | Grant Screen Recording to Latch, then quit and reopen Latch. |
+| Taps or typing do nothing | Grant Accessibility to Latch and allow Automation for System Events. |
+| Error `ocr_unavailable` | Install the Xcode Command Line Tools with `xcode-select --install`. |
+| The mirror disconnects mid-run | The iPhone was unlocked. Lock it and reconnect. |
+| First task is very slow | The helpers are compiling. This happens once, for about a minute. |
+
+## Good to know
+
+- **The cursor is shared.** A run moves the Mac's real pointer, because iPhone
+  Mirroring only reacts to real mouse events. The cursor is returned after each
+  click, but you cannot use the mouse during a run.
+- **App knowledge is extensible.** Files in [`app_hints/`](app_hints) teach the
+  agent an app's layout, renamed features and popups. Bundled: Gmail, Instagram,
+  Safari, Settings, Spotify, TikTok, WhatsApp, X and YouTube. Add your own by
+  dropping in a new `.md` file.
+- **No phone-side setup.** No Developer Mode, no WebDriverAgent, no signing.
+  That is also why apps that block automation may not work.
+- **Smoke test.** Run the bundled Settings workflow from the canvas with the
+  mirror visible and confirm the taps land on the phone. Then run a real chore.
+
+Built for the Hermes Hackathon by AI Worth Using and Plow.
