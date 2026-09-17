@@ -1,6 +1,7 @@
 services:
   agent:
     build: .
+    env_file: ${PLOW_CREDENTIALS:-./plow-credentials}
     ports:
       - "0.0.0.0:8788:8787"
     environment:
@@ -14,7 +15,6 @@ services:
       PHONEFLOW_AGENT_MODEL: ${PHONEFLOW_AGENT_MODEL:-glm-5.3-flash}
       PHONEFLOW_GROUNDER_MODEL: ${PHONEFLOW_GROUNDER_MODEL:-qwen3.5:397b}
     volumes:
-      - ./plow-credentials:/var/lib/plow/credentials.host:ro
       - agent-home:/var/lib/hermes
     stop_grace_period: 35s
 
