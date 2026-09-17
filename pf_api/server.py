@@ -281,8 +281,8 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             doc = {
                 "id": wf_id, "name": "Ad-hoc task", "version": 1,
                 "nodes": [
-                    {"id": "n1", "type": "trigger.manual", "params": {}},
-                    {"id": "n2", "type": "agent.task", "params": params},
+                    {"id": "n1", "type": "trigger.manual", "position": {"x": 0, "y": 0}, "params": {}},
+                    {"id": "n2", "type": "agent.task", "position": {"x": 0, "y": 1}, "params": params},
                 ],
                 "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
             }
