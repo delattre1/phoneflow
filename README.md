@@ -3,6 +3,7 @@
 Draw iPhone chores on a canvas; Hermes runs them through Plow Latch and
 iPhone Mirroring on a nearby Mac.
 
+- **Install guide (new users):** [English](docs/INSTALL.md) · [Português](docs/INSTALL.pt-BR.md).
 - **License:** MIT (see [LICENSE](LICENSE)).
 - **Network:** LAN only. The API listens on **host port `8788`** (container
   stays 8787) so any device on the home network can open the canvas.
