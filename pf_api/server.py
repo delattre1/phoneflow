@@ -268,13 +268,33 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             self._send(400, {"code": "validation", "path": "$", "message": "invalid json"})
             return
         wf_id = body.get("workflowId") if isinstance(body, dict) else None
-        if not wf_id:
-            self._send(400, {"code": "validation", "path": "workflowId", "message": "workflowId required"})
+        goal = body.get("goal") if isinstance(body, dict) else None
+        if goal:
+            # Ad-hoc task: a free-text goal (e.g. sent by the owner over iMessage)
+            # runs as a one-node agent.task graph, so any request works without a
+            # workflow drawn in the canvas first.
+            wf_id = "wf_adhoc"
+            steps = body.get("maxSteps")
+            params = {"goal": str(goal)}
+            if isinstance(steps, int) and steps > 0:
+                params["maxSteps"] = steps
+            doc = {
+                "id": wf_id, "name": "Ad-hoc task", "version": 1,
+                "nodes": [
+                    {"id": "n1", "type": "trigger.manual", "params": {}},
+                    {"id": "n2", "type": "agent.task", "params": params},
+                ],
+                "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+            }
+        elif not wf_id:
+            self._send(400, {"code": "validation", "path": "workflowId",
+                             "message": "workflowId or goal required"})
             return
-        doc = load_workflow(self._home(), wf_id)
-        if doc is None:
-            self._send(404, {"code": "not_found", "message": "workflow not found"})
-            return
+        else:
+            doc = load_workflow(self._home(), wf_id)
+            if doc is None:
+                self._send(404, {"code": "not_found", "message": "workflow not found"})
+                return
         run_id = new_run_id()
         save_run(
             self._home(),
@@ -299,7 +319,16 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             if run["status"] == "running":
                 self._persist(itp)
         self._persist(itp)
-        self._send(200, {"runId": run_id})
+        out = {"runId": run_id, "status": itp.run.get("status") if itp.run else None}
+        results = getattr(itp, "agent_results", None)
+        if results:
+            last = results[-1]
+            out["result"] = {
+                "status": last.get("status"),
+                "message": last.get("message"),
+                "records": last.get("records"),
+            }
+        self._send(200, out)
 
     def _confirm(self, run_id: str) -> None:
         itp = self.server.interpreters.get(run_id)
