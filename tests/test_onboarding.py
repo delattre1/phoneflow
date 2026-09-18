@@ -52,6 +52,7 @@ def test_doctor_asks_for_the_llm_key_first(tmp_path, monkeypatch):
 
 def test_config_saves_the_key_and_never_echoes_it(tmp_path, monkeypatch):
     monkeypatch.delenv("PHONEFLOW_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("PHONEFLOW_LLM_BASE_URL", "http://127.0.0.1:9/v1")  # nothing listens: unlistable endpoint
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     httpd, port = _boot(tmp_path)
     try:
@@ -120,3 +121,20 @@ def test_model_names_resolve_to_the_endpoints_spelling():
     assert settings.resolve_model(None, "qwen3.5:397b", served) == "qwen/qwen3.5-397b"
     assert settings.resolve_model(None, "z-ai/glm-5.3", served) == "z-ai/glm-5.3"
     assert settings.resolve_model(None, "kimi-k3", served) == "kimi-k3"
+
+
+def test_doctor_reports_where_each_model_lands(monkeypatch):
+    class Models:
+        def list(self):
+            class M:  # noqa: D401
+                def __init__(self, i): self.id = i
+            class R:
+                data = [M("anthropic/claude-sonnet-5"), M("z-ai/glm-5.3")]
+            return R()
+    class Client:
+        models = Models()
+    monkeypatch.setenv("PHONEFLOW_AGENT_MODEL", "glm-5.3")
+    monkeypatch.setenv("PHONEFLOW_GROUNDER_MODEL", "qwen3.5:397b")
+    r = settings.model_report(Client())
+    assert r["planner"] == {"wanted": "glm-5.3", "resolved": "z-ai/glm-5.3", "found": True}
+    assert r["grounder"]["found"] is False

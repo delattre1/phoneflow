@@ -20,6 +20,9 @@ _CHECKS = [
      "PhoneFlow needs an AI model to plan taps. This agent was not installed through Plow, "
      "so it has no model credits of its own: send an API key for an OpenAI-compatible "
      "endpoint and I will save it (stored on your agent, never shown again).", None),
+    ("llmModel", "AI model available on the endpoint",
+     "The planner model is not offered by the model endpoint. Pick one it lists "
+     "(the `detail` says which are available) with PUT /api/config {\"agentModel\": \"...\"}.", None),
     ("latch", "Plow Latch is running on the Mac",
      "Open the Plow Latch app on your Mac, sign in, and leave it running.", None),
     ("helpers", "PhoneFlow helpers installed on the Mac",
@@ -51,6 +54,28 @@ def run(driver) -> dict:
         raw = probe()
     raw["llmKey"] = bool(settings.llm_api_key())
     detail = raw.get("detail") or {}
+    raw["llmModel"] = None
+    if raw["llmKey"]:
+        try:
+            report = settings.model_report()
+        except Exception as exc:  # noqa: BLE001
+            report = None
+            detail["llmModel"] = f"could not reach the model endpoint: {str(exc)[:200]}"
+        if report and report.get("planner"):
+            planner, grounder = report["planner"], report["grounder"]
+            # Only a listed endpoint that lacks the model is a failure; one that
+            # does not list models cannot be checked and is not blocked on.
+            raw["llmModel"] = planner["found"] is not False
+            served = report["available"]
+            detail["llmModel"] = (
+                f"planner {planner['wanted']} -> {planner['resolved']}"
+                f"{'' if planner['found'] is not False else ' (NOT served)'}; "
+                f"grounder {grounder['wanted'] or 'off'} -> "
+                f"{grounder['resolved'] if grounder['found'] is not False else 'not served, icons by OCR/local model only'}"
+                + (f"; endpoint lists {len(served)} models" if served is not None else "; endpoint does not list models")
+            )
+        else:
+            raw["llmModel"] = True
     checks = []
     for cid, title, fix, pane in _CHECKS:
         ok = raw.get(cid)
@@ -59,8 +84,8 @@ def run(driver) -> dict:
             item["fix"] = fix
             if pane:
                 item["pane"] = pane
-            if detail.get(cid):
-                item["detail"] = detail[cid]
+        if detail.get(cid):
+            item["detail"] = detail[cid]
         checks.append(item)
     missing = [c for c in checks if c["ok"] is False]
     unknown = [c for c in checks if c["ok"] is None]

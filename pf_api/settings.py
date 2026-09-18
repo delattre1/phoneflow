@@ -120,6 +120,45 @@ def llm_base_url() -> str:
     return "https://ollama.com/v1"
 
 
+def grounder_model() -> str:
+    return os.environ.get("PHONEFLOW_GROUNDER_MODEL", "qwen3.5:397b")
+
+
+def list_models(client) -> list[str] | None:
+    """Model ids the endpoint serves, or None when it cannot say."""
+    try:
+        return [m.id for m in client.models.list().data]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def model_report(client=None) -> dict:
+    """Which model each role will actually run on, against the live endpoint.
+
+    {"provider", "baseUrl", "planner": {"wanted", "resolved", "found"},
+     "grounder": {...}, "available": [...] | None}. `found` is None when the
+    endpoint does not list its models; then the name is passed through as is.
+    """
+    if client is None:
+        import openai  # lazy: the graph path needs no LLM at all
+        key = llm_api_key()
+        if not key:
+            return {"provider": "none", "baseUrl": llm_base_url(), "available": None,
+                    "planner": None, "grounder": None}
+        client = openai.OpenAI(api_key=key, base_url=llm_base_url(), timeout=15, max_retries=0)
+    available = list_models(client)
+
+    def role(wanted: str) -> dict:
+        if not wanted:
+            return {"wanted": "", "resolved": "", "found": None}
+        resolved = resolve_model(client, wanted, available)
+        found = None if available is None else (resolved in available)
+        return {"wanted": wanted, "resolved": resolved, "found": found}
+
+    return {"provider": llm_provider(), "baseUrl": llm_base_url(), "available": available,
+            "planner": role(agent_model()), "grounder": role(grounder_model())}
+
+
 def resolve_model(client, wanted: str, available: list[str] | None = None) -> str:
     """Map a model name onto what the endpoint actually serves.
 
@@ -130,9 +169,8 @@ def resolve_model(client, wanted: str, available: list[str] | None = None) -> st
     the endpoint's own error tells the owner.
     """
     if available is None:
-        try:
-            available = [m.id for m in client.models.list().data]
-        except Exception:  # noqa: BLE001 — listing is a nicety, not a requirement
+        available = list_models(client)
+        if available is None:  # listing is a nicety, not a requirement
             return wanted
     if wanted in available:
         return wanted

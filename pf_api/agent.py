@@ -471,7 +471,14 @@ class AgentLoop:
         self.model = model or _resolved(self.client, settings.agent_model())
         self.max_steps = max_steps
         # Default on; tests pass grounder=None to keep the loop off the network.
-        self.grounder = IconGrounder(self.client) if grounder is _UNSET else grounder
+        if grounder is _UNSET:
+            # A grounder the endpoint does not serve would fail every icon pass
+            # (and each failure costs a round trip); without it the loop still
+            # has OCR and the local icon model, so it is dropped, not forced.
+            served = settings.list_models(self.client)
+            resolved = settings.resolve_model(self.client, GROUNDER_MODEL, served) if GROUNDER_MODEL else ""
+            grounder = IconGrounder(self.client, resolved) if resolved and (served is None or resolved in served) else None
+        self.grounder = grounder
         self._pool = ThreadPoolExecutor(max_workers=1)
         self._icons = None
         self.records: list[str] = []
