@@ -161,7 +161,8 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             try:
                 if hasattr(drv, "_ensure_session"):
                     drv._ensure_session()
-                self._send(200, {"tools": sorted(getattr(drv, "_tools", []))})
+                self._send(200, {"tools": sorted(getattr(drv, "_tools", [])),
+                                 "docs": getattr(drv, "_tool_docs", {})})
             except Exception as exc:  # noqa: BLE001
                 self._send(502, {"code": "latch_disconnected", "message": str(exc)[:300]})
             return

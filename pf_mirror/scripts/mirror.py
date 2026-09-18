@@ -173,6 +173,7 @@ class LatchDriver:
         self._session_id: str | None = None
         self._req_id = 0
         self._tools: list[str] = []
+        self._tool_docs: dict = {}
         self._ocr_ready = False
         self._ocr_key: str = ""
         self._ocr_lines_cache: list[dict] = []
@@ -286,6 +287,9 @@ class LatchDriver:
         self._rpc("notifications/initialized", {}, notify=True)
         listing = self._rpc("tools/list", {}) or {}
         self._tools = [t.get("name", "") for t in listing.get("tools", [])]
+        self._tool_docs = {t.get("name", ""): {"description": t.get("description", ""),
+                                               "inputSchema": t.get("inputSchema", {})}
+                           for t in listing.get("tools", [])}
 
     def _call(self, tool: str, arguments: dict) -> dict:
         self._ensure_session()
