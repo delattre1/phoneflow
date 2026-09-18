@@ -154,6 +154,17 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
         if path == "/api/config":
             self._send(200, settings.public_config(self._home()))
             return
+        if path == "/api/latch/tools":
+            # Which relay tools this Latch offers (names only): what the driver
+            # can and cannot delegate to it, vault fill included.
+            drv = self.server.driver
+            try:
+                if hasattr(drv, "_ensure_session"):
+                    drv._ensure_session()
+                self._send(200, {"tools": sorted(getattr(drv, "_tools", []))})
+            except Exception as exc:  # noqa: BLE001
+                self._send(502, {"code": "latch_disconnected", "message": str(exc)[:300]})
+            return
         if path == "/api/models":
             probe = "probe=1" in (urlparse(self.path).query or "")
             try:
