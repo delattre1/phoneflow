@@ -20,6 +20,7 @@ The owner is not a developer. They will do this from iMessage, one step at a tim
 - `helpers`: you install these yourself during the doctor call; the first time can take a minute. Only involve the owner if it keeps failing.
 - `automation`, `accessibility`, `screenRecording`: macOS privacy switches for **Plow Latch**. Only the owner can flip them. After Screen Recording they must quit and reopen Plow Latch — say so. If Plow Latch is not in the list yet, tell them to use the "+" button and pick Plow Latch from Applications.
 - `mirrorWindow`: the iPhone Mirroring app must be open and connected; the iPhone stays locked and near the Mac.
+- Mac password prompts: iPhone Mirroring asks for the Mac password (or Touch ID) when it connects, and again for apps that use Face ID. PhoneFlow cannot type that password: Latch's vault only fills into web pages, never into a macOS prompt. Tell the owner once, during setup, to open iPhone Mirroring → menu **iPhone Mirroring → Settings…** and choose **Authenticate Automatically**, so the connection prompt stops appearing. A run that meets a password prompt parks and asks the owner to unlock the mirror on the Mac (Touch ID is quickest); never ask for the password itself.
 
 ## After setup
 

@@ -187,6 +187,7 @@ O agente responde com o que encontrou (ex.: o texto do post, os títulos).
 - **Apps bloqueados.** A lista vem vazia por padrão. Defina
   `PHONEFLOW_BLOCKED_APPS="C6,Nubank,Wallet"` pra o agente recusar apps por nome
   (busca por trecho, sem diferenciar maiúsculas).
+- **Pedidos de senha do Mac.** O iPhone Mirroring pede a senha do Mac ao conectar e nos apps que usam Face ID. O PhoneFlow nunca digita essa senha: o cofre do Latch só preenche páginas web, não prompts do macOS. Em iPhone Mirroring → Ajustes escolha **Autenticar Automaticamente** para o pedido da conexão sumir; um pedido de Face ID dentro de um app pausa a tarefa até você desbloquear no Mac.
 - **Sem setup no telefone.** Sem Modo de Programador, sem WebDriverAgent, sem
   assinatura — só o iPhone Mirroring. É por isso também que apps de banco que
   bloqueiam automação podem não funcionar, e que nada precisa ser reassinado toda

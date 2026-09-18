@@ -187,6 +187,7 @@ The agent replies with what it found (e.g. the post text, the titles).
 - **Blocked apps.** The list is empty by default. Set
   `PHONEFLOW_BLOCKED_APPS="C6,Nubank,Wallet"` to make the agent refuse apps by
   name (case-insensitive substring match).
+- **Mac password prompts.** iPhone Mirroring asks for the Mac password when it connects and for apps that use Face ID. PhoneFlow never types it: Latch's vault fills web pages only, not macOS prompts. In iPhone Mirroring → Settings choose **Authenticate Automatically** to stop the connection prompt; an in-app Face ID prompt parks the run until you unlock on the Mac.
 - **No phone-side setup.** No Developer Mode, no WebDriverAgent, no signing — just
   iPhone Mirroring. That is also why banking apps that block automation may not
   work, and why nothing needs weekly re-signing.
