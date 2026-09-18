@@ -298,3 +298,44 @@ def test_helper_paths_resolve_against_the_macs_home_not_the_containers():
     drv.health()
     drv._ensure_ocr()
     assert written and all(p.startswith("/Users/owner/") for p in written), written
+
+
+def test_a_new_mac_gets_prebuilt_helpers_and_never_needs_swiftc():
+    # The first tap on a fresh Mac must not depend on the Xcode Command Line
+    # Tools: every helper has a checked-in binary that matches its source.
+    scripts, written = [], []
+
+    def handler(method, params, msg):
+        name = params.get("name")
+        if name == "plow_run_applescript":
+            script = params["arguments"]["script"]
+            scripts.append(script)
+            if "echo $HOME" in script:
+                out = "/Users/owner"
+            elif "base64 -D" in script:
+                out = "yes"
+            elif "test -x" in script:
+                out = "no"
+            else:
+                out = ""
+            return _envelope({"exit_code": 0, "output": out})
+        if name == "plow_write_file":
+            written.append(params["arguments"]["path"])
+            return _envelope({"status": "completed"})
+        raise AssertionError(name)
+
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
+    drv.health()
+    drv._ensure_ocr()
+    assert not any("swiftc" in s for s in scripts)
+    assert "/Users/owner/.phoneflow/pf_idle.b64" in written
+    assert not any(p.endswith(".swift") for p in written)
+
+
+def test_actions_wait_for_the_owner_and_hand_the_focus_back():
+    drv = LatchDriver(transport=FakeTransport(_ocr_handler([])), agent_token="tok")
+    drv.health()
+    drv.tap_point(200, 300)
+    sent = drv.scripts[-1]
+    assert sent.index("pf_idle") < sent.index("frontmost") < sent.index("pf_drag")
+    assert sent.rindex("pfPrev to true") > sent.index("pf_drag")

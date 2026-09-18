@@ -23,5 +23,12 @@ sips -c "$(echo "$H*$S" | bc | cut -d. -f1)" "$(echo "$W*$S" | bc | cut -d. -f1)
 LONG=$(echo "$H*$S*$UP" | bc | cut -d. -f1)
 sips -Z "$LONG" "$C" >/dev/null
 OCR=$("$HOME/.phoneflow/pf_ocr" "$C")
+# Local icon detection over the same crop, only if the owner supplied a model
+# (PHONEFLOW_ICON_MODEL); absent, icons is null and the driver skips them.
+ICON_MODEL="$HOME/.phoneflow/icon_detect.mlpackage"
+ICONS=null
+if [ -e "$ICON_MODEL" ] && [ -x "$HOME/.phoneflow/pf_icons" ]; then
+  ICONS=$("$HOME/.phoneflow/pf_icons" "$C" "$ICON_MODEL" 2>/dev/null || echo null)
+fi
 sips -s format jpeg -s formatOptions 70 -Z "$JMAX" "$C" --out "$J" >/dev/null
-printf '{"ocr":%s,"frame":"%s"}' "$OCR" "$(base64 -i "$J")"
+printf '{"ocr":%s,"icons":%s,"frame":"%s"}' "$OCR" "$ICONS" "$(base64 -i "$J")"

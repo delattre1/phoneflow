@@ -13,7 +13,8 @@ A phone task takes MINUTES. Never wait for it inside one HTTP call: start it in 
    - Plain-language task (anything else the owner asks): JSON `{"goal": "<their request, word for word>", "maxSteps": 30, "async": true}`. No graph needed.
 3. Tell the owner the run has started. Then poll `GET /api/runs/{runId}` every 15–20 seconds (`sleep 15` between calls, each call is short) until `status` is no longer `running`. Keep polling for up to 15 minutes. `result.message` (and `result.records`) is the answer to relay back to the owner.
 4. Status `awaiting_confirm` → ask the owner yes/no, then `POST /api/runs/{runId}/confirm` with `{"decision": "approve"}` or `{"decision": "deny"}`.
-5. `GET /api/health` latch `down` → tell the owner to open Latch on the Mac. Do not invent taps.
+5. A run that fails with `latch_disconnected`, `agent_unconfigured`, `mirror_window_missing`, `ocr_unavailable`, `host_gate` or blank frames is a SETUP problem, not a task problem: switch to the pf-setup skill (`GET /api/doctor`) and walk the owner through what is missing. Do not retry the run until the doctor says `ready`. Do not invent taps.
+6. When you start a run, tell the owner you will borrow the Mac's mouse and keyboard for a moment at each step (it waits for a pause in their typing and hands the focus back); tell them when the run is over.
 
 ONE RUN AT A TIME — this matters, a second run can post, send or buy twice:
 - A timeout, a dropped connection or an error on YOUR side does NOT mean the run failed. The run keeps going on the phone. Poll its `runId`; never start it again.

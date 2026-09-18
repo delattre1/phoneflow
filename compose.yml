@@ -7,10 +7,12 @@ services:
     environment:
       AGENT_ID: phoneflow-agent
       PHONEFLOW_DRIVER: latch
-      # agent.task nodes need this; graph-only workflows run without it.
+      # Optional. Empty, the planner uses the agent's own Plow model credits
+      # (PLOW_API_BASE with the agent token, same as the chat agent). Set a key
+      # to bring your own OpenAI-compatible endpoint instead.
       PHONEFLOW_LLM_API_KEY: ${PHONEFLOW_LLM_API_KEY:-}
-      PHONEFLOW_LLM_BASE_URL: ${PHONEFLOW_LLM_BASE_URL:-https://ollama.com/v1}
-      PHONEFLOW_AGENT_MODEL: ${PHONEFLOW_AGENT_MODEL:-glm-5.3-flash}
+      PHONEFLOW_LLM_BASE_URL: ${PHONEFLOW_LLM_BASE_URL:-}
+      PHONEFLOW_AGENT_MODEL: ${PHONEFLOW_AGENT_MODEL:-glm-5.3}
       PHONEFLOW_GROUNDER_MODEL: ${PHONEFLOW_GROUNDER_MODEL:-qwen3.5:397b}
       GATEWAY_ALLOW_ALL_USERS: ${GATEWAY_ALLOW_ALL_USERS:-true}
       GATEWAY_DM_POLICY: ${GATEWAY_DM_POLICY:-open}

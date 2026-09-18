@@ -40,10 +40,13 @@ instruction, not a hard block: for an enforced refusal, list the app names in
 - **Agent host:** Docker + the docker compose plugin, and the
   [`plow-agents`](https://github.com/plow-pbc/plow-agents) tooling.
 - **Mac:** macOS 15+ (Apple Silicon), Plow **Latch**, **iPhone Mirroring**
-  paired with your iPhone, and the **Xcode Command Line Tools**
-  (`xcode-select --install`) — the Mac helpers are compiled with `swiftc`.
-- **An LLM key** for an OpenAI-compatible endpoint (the planner). The default
-  endpoint is `https://ollama.com/v1` and the default model is `glm-5.3-flash` (set `PHONEFLOW_AGENT_MODEL=kimi-k3` for tougher reasoning).
+  paired with your iPhone. The Mac helpers ship prebuilt; the **Xcode Command
+  Line Tools** (`xcode-select --install`) are only a fallback.
+- **A model for the planner.** An agent installed through Plow already has one:
+  the planner uses the agent's own Plow model credits (the same gateway the chat
+  agent uses), default model `glm-5.3`. Optionally bring your own key for an
+  OpenAI-compatible endpoint with `PHONEFLOW_LLM_API_KEY` (and
+  `PHONEFLOW_LLM_BASE_URL`, default `https://ollama.com/v1`), or by chat.
 
 ---
 
@@ -62,9 +65,10 @@ plow-agents lines          # list your lines
 plow-agents mint ln_xxx    # writes ./plow-credentials next to compose.yml
 
 # the planner needs an LLM key (agent tasks); put it in the environment:
-export PHONEFLOW_LLM_API_KEY=sk-...            # your OpenAI-compatible key
+# optional — empty, the planner runs on the agent's own Plow model credits:
+# export PHONEFLOW_LLM_API_KEY=sk-...          # your own OpenAI-compatible key
 export PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # default
-export PHONEFLOW_AGENT_MODEL=glm-5.3-flash    # default planner (kimi-k3 for harder tasks)
+export PHONEFLOW_AGENT_MODEL=glm-5.3          # default planner (kimi-k3 for harder tasks)
 
 docker compose up --build -d
 ```
@@ -106,11 +110,7 @@ When both are running, `/api/health` reports `latch: "up"`.
 ## The Mac helpers
 
 iPhone Mirroring ignores most synthetic input, so PhoneFlow ships small helpers
-that run on the Mac. **You never install them by hand.** On first use the driver
-writes each source to `~/.phoneflow/` through Latch, compiles it with
-`xcrun swiftc -O`, and stores a hash of the source next to the binary. When a
-helper changes in the repo, it is rebuilt automatically. The first run costs
-about a minute.
+that run on the Mac. **You never install them by hand**, and a new Mac does not need Xcode. Universal prebuilt binaries are checked in under [`mac/bin/`](../mac/bin) (built by `sh mac/build.sh`); on first use the driver ships each one to `~/.phoneflow/` through Latch and verifies its sha256. Only when no prebuilt binary matches the helper's source does it fall back to compiling with `xcrun swiftc -O`, which needs the Xcode Command Line Tools. A hash of the source sits next to each binary, so a helper that changes in the repo is replaced automatically.
 
 | Helper | What it does |
 |---|---|
@@ -120,6 +120,7 @@ about a minute.
 | `pf_drag` | Real mouse events: click, long press and drag. |
 | `pf_scroll` | Trackpad-style scroll gesture with momentum, so feeds flick to the next page. |
 | `pf_key` | Types text with real key codes, which is what iPhone Mirroring forwards. |
+| `pf_idle` | Waits for a pause in your own mouse and keyboard use before each action, and reports which macOS permissions Latch holds for the setup doctor. |
 
 ## Part 3 — Icon detection model (recommended)
 
@@ -180,14 +181,9 @@ The agent replies with what it found (e.g. the post text, the titles).
 
 ## Notes & tips
 
-- **App knowledge is extensible.** `app_hints/<app>.md` files teach the agent an
-  app's layout, renamed features and popups. Bundled: YouTube, Instagram,
-  TikTok, WhatsApp, Settings, Safari, Spotify, Gmail, X. Add your own by dropping
-  a new `.md` file.
-- **The cursor is shared.** While a task runs, it moves the Mac's real pointer to
-  click the mirror (iPhone Mirroring only reacts to real mouse events); it
-  returns the cursor after each click, but you cannot use the mouse at the same
-  time.
+- **App knowledge is extensible, by chat.** App hints teach the agent an app's layout, renamed features and popups. Bundled: Gmail, Instagram, Safari, Settings, Spotify, TikTok, WhatsApp, X and YouTube. Tell the agent what it should know ("in Instagram the Reels tab is the middle one") and it saves a note on your own install, which wins over the bundled one. Same thing over the API: `GET/PUT/DELETE /api/hints/<app>`. Developers can still drop a `.md` file in [`app_hints/`](../app_hints).
+- **Setup is checked, not assumed.** `GET /api/doctor` probes Latch, the helpers, each macOS permission, the mirror window and the LLM key, and names the next thing to fix. On your first message the agent walks you through it one step at a time and opens the right Settings page on the Mac. The LLM key and blocked apps can be set by chat too (`PUT /api/config`); they are stored on the agent's volume and override the environment.
+- **The cursor is borrowed, politely.** iPhone Mirroring only reacts to the Mac's real pointer and keyboard focus. Posting events straight to its process does not work: we tested clicks, drags and scrolls, focused and not, and other projects document the same. So each action waits for a short pause in your own mouse and keyboard use (`PHONEFLOW_IDLE_NEED`, default 0.7 s, giving up after `PHONEFLOW_IDLE_MAX`, default 10 s), brings the mirror forward, acts, then returns the pointer and the focus to the app you were in. You can keep working during a run, with brief interruptions. For zero interference, run Latch and iPhone Mirroring on a spare Mac.
 - **Blocked apps.** The list is empty by default. Set
   `PHONEFLOW_BLOCKED_APPS="C6,Nubank,Wallet"` to make the agent refuse apps by
   name (case-insensitive substring match).

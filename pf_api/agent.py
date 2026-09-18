@@ -27,6 +27,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from pf_api import settings
 from pf_api.driver import DriverError
 from pf_api.schema import PAY_TAP_RE
 
@@ -37,7 +38,7 @@ from pf_api.schema import PAY_TAP_RE
 # image in ~3s against ~6s for kimi-k3 and ~33s for qwen3.5, and grounds in ~10s
 # against ~37s. Latency dominates a per-step loop, so the fast model is the
 # default for both roles; PHONEFLOW_AGENT_MODEL still overrides for quality runs.
-MODEL = os.environ.get("PHONEFLOW_AGENT_MODEL", "glm-5.3-flash")
+MODEL = os.environ.get("PHONEFLOW_AGENT_MODEL", "glm-5.3")
 BASE_URL = os.environ.get("PHONEFLOW_LLM_BASE_URL", "https://ollama.com/v1")
 MAX_STEPS = int(os.environ.get("PHONEFLOW_AGENT_MAX_STEPS", "25"))
 # The vision models on Ollama Cloud are reasoning models: their hidden reasoning
@@ -254,102 +255,49 @@ def _blocked_apps() -> list[str]:
     off-limits even if the goal names them, so an agent on someone's phone cannot
     move money or read secrets. Matching is case-insensitive substring.
     """
-    raw = os.environ.get("PHONEFLOW_BLOCKED_APPS", "")
-    return [a.strip().lower() for a in raw.split(",") if a.strip()]
+    return settings.blocked_apps()
 
 
 def _app_doc(name: str) -> str:
-    """The notes file for one app by name, from app_hints/ (see _load_app_hints)."""
-    import glob
-    key = (name or "").strip().lower()
-    if not key:
-        return ""
-    dirs = []
-    env = os.environ.get("PHONEFLOW_APP_HINTS")
-    if env:
-        dirs.append(env)
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    dirs.append(os.path.join(here, "app_hints"))
-    home = os.environ.get("PHONEFLOW_HOME")
-    if home:
-        dirs.append(os.path.join(home, "app_hints"))
-    for d in dirs:
-        for path in sorted(glob.glob(os.path.join(d, "*.md"))):
-            base = os.path.splitext(os.path.basename(path))[0].lower()
-            if base == key or base in key or key in base:
-                try:
-                    return open(path, encoding="utf-8").read().strip()
-                except OSError:
-                    pass
-    return ""
-
-
-def _app_doc(name: str) -> str:
-    """The notes file for one app by name, from app_hints/ (see _load_app_hints)."""
-    import glob
-    key = (name or "").strip().lower()
-    if not key:
-        return ""
-    dirs = []
-    env = os.environ.get("PHONEFLOW_APP_HINTS")
-    if env:
-        dirs.append(env)
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    dirs.append(os.path.join(here, "app_hints"))
-    home = os.environ.get("PHONEFLOW_HOME")
-    if home:
-        dirs.append(os.path.join(home, "app_hints"))
-    for d in dirs:
-        for path in sorted(glob.glob(os.path.join(d, "*.md"))):
-            base = os.path.splitext(os.path.basename(path))[0].lower()
-            if base == key or base in key or key in base:
-                try:
-                    return open(path, encoding="utf-8").read().strip()
-                except OSError:
-                    pass
-    return ""
+    """The notes file for one app by name (see settings.hint_for_app)."""
+    return settings.hint_for_app(name)
 
 
 def _load_app_hints(goal: str) -> str:
     """Return per-app guidance whose file name appears in the goal.
 
-    Hints live as `<app>.md` under app_hints/ (bundled) or PHONEFLOW_APP_HINTS.
-    They carry what a generic model cannot know — a renamed tab, a popup to
-    dismiss, how a feed paginates — so the agent handles each app without any
-    app-specific code. Anyone can drop a new file to support a new app.
+    Hints are `<app>.md` files: the owner's own under PHONEFLOW_HOME/app_hints
+    (editable over the API, so by chat), then PHONEFLOW_APP_HINTS, then the ones
+    bundled in the image — an owner's note replaces a bundled one of the same
+    name. They carry what a generic model cannot know — a renamed tab, a popup
+    to dismiss, how a feed paginates — so the agent handles each app without any
+    app-specific code.
     """
-    import glob
-    g = (goal or "").lower()
-    dirs = []
-    env = os.environ.get("PHONEFLOW_APP_HINTS")
-    if env:
-        dirs.append(env)
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    dirs.append(os.path.join(here, "app_hints"))
-    home = os.environ.get("PHONEFLOW_HOME")
-    if home:
-        dirs.append(os.path.join(home, "app_hints"))
-    seen, out = set(), []
-    for d in dirs:
-        for path in sorted(glob.glob(os.path.join(d, "*.md"))):
-            name = os.path.splitext(os.path.basename(path))[0].lower()
-            if name in seen or name not in g:
-                continue
-            try:
-                out.append(open(path, encoding="utf-8").read().strip())
-                seen.add(name)
-            except OSError:
-                continue
-    return "\n\n".join(out)
+    return settings.hints_for_goal(goal)
 
 
 def _client():
     import openai  # imported lazily so the graph path needs no API credentials
 
-    key = os.environ.get("PHONEFLOW_LLM_API_KEY") or os.environ.get("OLLAMA_API_KEY")
+    key = settings.llm_api_key()
     if not key:
-        raise DriverError("agent_unconfigured", "PHONEFLOW_LLM_API_KEY is not set")
-    return openai.OpenAI(api_key=key, base_url=BASE_URL)
+        raise DriverError(
+            "agent_unconfigured",
+            "no LLM API key yet: the owner has to give one (PUT /api/config llmApiKey, see the pf-setup skill)")
+    return openai.OpenAI(api_key=key, base_url=settings.llm_base_url())
+
+
+_MODEL_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _resolved(client, wanted: str) -> str:
+    """`wanted` as this endpoint spells it (settings.resolve_model), cached per
+    endpoint so the model list is fetched once, not per run."""
+    base = str(getattr(client, "base_url", ""))
+    key = (base, wanted)
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = settings.resolve_model(client, wanted)
+    return _MODEL_CACHE[key]
 
 
 GROUND_PROMPT = (
@@ -376,7 +324,7 @@ class IconGrounder:
 
     def __init__(self, client, model: str = GROUNDER_MODEL):
         self.client = client
-        self.model = model
+        self.model = _resolved(client, model) if model else model
         self._key = ""
         self._cache: list[dict] = []
 
@@ -516,11 +464,11 @@ class AgentLoop:
     `client` is injectable so tests can drive the loop without the network.
     """
 
-    def __init__(self, driver, client=None, model: str = MODEL, max_steps: int = MAX_STEPS,
+    def __init__(self, driver, client=None, model: str | None = None, max_steps: int = MAX_STEPS,
                  grounder=_UNSET):
         self.driver = driver
         self.client = client or _client()
-        self.model = model
+        self.model = model or _resolved(self.client, settings.agent_model())
         self.max_steps = max_steps
         # Default on; tests pass grounder=None to keep the loop off the network.
         self.grounder = IconGrounder(self.client) if grounder is _UNSET else grounder

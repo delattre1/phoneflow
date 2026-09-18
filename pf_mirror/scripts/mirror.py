@@ -33,452 +33,31 @@ import urllib.request
 
 from pf_api.driver import DriverError
 
-OCR_SWIFT = r"""// PhoneFlow OCR — macOS Vision text recognition over a screenshot.
-//
-// Prints one JSON object on stdout:
-//   {"w":<image px>,"h":<image px>,"lines":[{"t":"text","nx":0..1,"ny":0..1}]}
-//
-// nx/ny are the CENTRE of each recognised line, normalised to the image with a
-// TOP-LEFT origin (Vision's own boxes are bottom-left, so the flip happens
-// here). Normalised rather than absolute because the caller crops and upscales
-// the mirror window before OCR — only it knows where that crop sits on screen.
-import Foundation
-import Vision
-import AppKit
+def _mac_dir() -> str:
+    """Where the Mac-side helper sources (and prebuilt binaries) live.
 
-let args = CommandLine.arguments
-guard args.count > 1, let img = NSImage(contentsOfFile: args[1]),
-      let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-    FileHandle.standardError.write("usage: pf_ocr <image>\n".data(using: .utf8)!)
-    exit(2)
-}
+    mac/ sits beside the pf_mirror package, in the repo and in the image alike.
+    It is the ONLY copy: the sources used to be pasted into this module too, and
+    the two drifted (pf_observe.sh lost its icon pass in one of them).
+    """
+    env = os.environ.get("PHONEFLOW_MAC_DIR")
+    if env:
+        return env
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "mac")
 
-let sw = Double(cg.width), sh = Double(cg.height)
-// Screen size in points as well: the caller crops in pixels but clicks in
-// points, and the ratio between the two is the display's backing scale.
-let scr = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: sw, height: sh)
 
-let req = VNRecognizeTextRequest()
-req.recognitionLevel = .accurate
-req.usesLanguageCorrection = true
-req.recognitionLanguages = ["pt-BR", "en-US"]
+def _mac_source(name: str) -> str:
+    with open(os.path.join(_mac_dir(), name), encoding="utf-8") as fh:
+        return fh.read()
 
-try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
 
-var out: [String] = []
-func emit(_ text: String, _ box: CGRect) {
-    let cx = Double(box.origin.x) + Double(box.width) / 2.0
-    let cy = 1.0 - (Double(box.origin.y) + Double(box.height) / 2.0)
-    let esc = text.data(using: .utf8).flatMap {
-        String(data: try! JSONSerialization.data(withJSONObject: [String(data: $0, encoding: .utf8)!]), encoding: .utf8)
-    } ?? "[\"\"]"
-    let t = String(esc.dropFirst().dropLast())
-    out.append("{\"t\":\(t),\"nx\":\(cx),\"ny\":\(cy)}")
-}
-// Vision returns one observation per LINE, so a tab bar ("Home  Shorts  You")
-// or a pair of buttons ("Cancel   OK") came back as one item whose centre sat
-// between the targets — the agent asked for "Shorts" and tapped the gap. Each
-// line is split at gaps clearly wider than a space (a segment is a run of words
-// whose spacing is normal), so every button on a row gets its own centre.
-for obs in (req.results ?? []) {
-    guard let top = obs.topCandidates(1).first else { continue }
-    let str = top.string
-    var words: [(String, CGRect)] = []
-    var i = str.startIndex
-    while i < str.endIndex {
-        while i < str.endIndex, str[i].isWhitespace { i = str.index(after: i) }
-        if i >= str.endIndex { break }
-        var j = i
-        while j < str.endIndex, !str[j].isWhitespace { j = str.index(after: j) }
-        if let r = try? top.boundingBox(for: i..<j) {
-            words.append((String(str[i..<j]), r.boundingBox))
-        }
-        i = j
-    }
-    if words.count < 2 { emit(str, obs.boundingBox); continue }
-    // A typical space is about a third of the line height; anything past a
-    // full line height is a gap between separate controls.
-    let gapLimit = Double(obs.boundingBox.height) * 1.0
-    var seg: [(String, CGRect)] = [words[0]]
-    func flush() {
-        let text = seg.map { $0.0 }.joined(separator: " ")
-        let x0 = seg.map { Double($0.1.minX) }.min()!, x1 = seg.map { Double($0.1.maxX) }.max()!
-        let y0 = seg.map { Double($0.1.minY) }.min()!, y1 = seg.map { Double($0.1.maxY) }.max()!
-        emit(text, CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
-    }
-    for w in words.dropFirst() {
-        let gap = Double(w.1.minX) - Double(seg.last!.1.maxX)
-        if gap > gapLimit { flush(); seg = [w] } else { seg.append(w) }
-    }
-    flush()
-}
-print("{\"w\":\(Int(sw)),\"h\":\(Int(sh)),\"sw\":\(Int(scr.width)),\"sh\":\(Int(scr.height)),\"lines\":[\(out.joined(separator: ","))]}")
-"""
-
-DRAG_SWIFT = r"""// PhoneFlow drag — a real mouse drag via CoreGraphics.
-//
-// AppleScript-ObjC cannot pass a CGEventRef back into CGEventPost (it fails to
-// coerce to {__CGEvent=}), so the drag cannot live in an inline script the way
-// `click at` does. This binary is the equivalent that actually works.
-//
-// usage: pf_drag <x> <y>                          -> click
-//        pf_drag <x> <y> <holdMs>                 -> long press
-//        pf_drag <x1> <y1> <x2> <y2> <durationMs> -> drag
-import Foundation
-import CoreGraphics
-
-let a = CommandLine.arguments
-guard a.count >= 3, let x1 = Double(a[1]), let y1 = Double(a[2]) else {
-    FileHandle.standardError.write("usage: pf_drag x y | x1 y1 x2 y2 durationMs\n".data(using: .utf8)!)
-    exit(2)
-}
-let isClick = a.count < 6
-let holdMs = a.count == 4 ? (Double(a[3]) ?? 0.0) : 0.0
-let x2 = isClick ? x1 : (Double(a[3]) ?? x1)
-let y2 = isClick ? y1 : (Double(a[4]) ?? y1)
-let ms = isClick ? 0.0 : (Double(a[5]) ?? 300.0)
-
-let src = CGEventSource(stateID: .hidSystemState)
-
-// Where the owner's pointer was before we hijack it, so we can put it back.
-let origin = CGEvent(source: nil)?.location ?? CGPoint(x: x1, y: y1)
-
-func post(_ type: CGEventType, _ x: Double, _ y: Double) {
-    CGEvent(mouseEventSource: src, mouseType: type,
-            mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)?
-        .post(tap: .cghidEventTap)
-}
-
-// A click still needs the cursor moved there first: System Events' `click at`
-// posts no real mouse event, so iPhone Mirroring ignored it entirely — moving
-// then pressing is what the mirrored phone actually reacts to.
-post(.mouseMoved, x1, y1)
-usleep(useconds_t(80_000))
-
-if isClick {
-    post(.leftMouseDown, x1, y1)
-    // A long press is the same gesture held: iOS opens context menus on
-    // duration, so the only difference from a tap is how long the button is down.
-    usleep(useconds_t(max(holdMs, 60.0) * 1000))
-    post(.leftMouseUp, x1, y1)
-    // Return the pointer to where the owner left it (see `origin`), so the agent
-    // does not leave the cursor sitting on the phone window between actions.
-    usleep(useconds_t(20_000))
-    CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
-            mouseCursorPosition: origin, mouseButton: .left)?.post(tap: .cghidEventTap)
-    print("OK")
-    exit(0)
-}
-
-// iOS reads a swipe from the movement between press and release, so the path is
-// interpolated: a single jump from start to end registers as a tap, not a swipe.
-let steps = 24
-let perStep = max(ms, 120.0) / Double(steps)
-post(.leftMouseDown, x1, y1)
-usleep(useconds_t(30_000))
-for i in 1...steps {
-    let t = Double(i) / Double(steps)
-    post(.leftMouseDragged, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
-    usleep(useconds_t(perStep * 1000))
-}
-post(.leftMouseUp, x2, y2)
-usleep(useconds_t(20_000))
-CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
-        mouseCursorPosition: origin, mouseButton: .left)?.post(tap: .cghidEventTap)
-print("OK")
-"""
-
-KEY_SWIFT = r"""// PhoneFlow keyboard — types text into iPhone Mirroring with REAL key codes.
-//
-// iPhone Mirroring forwards hardware key events to the phone, keyed by the
-// virtual key code (that is why Cmd-1/Cmd-3 work). A CGEvent that carries only
-// a Unicode string with virtualKey 0 is NOT forwarded — Spotlight stays empty.
-// So each character is sent as its US-ANSI virtual key code, with the Shift
-// flag for uppercase and shifted symbols, exactly like a physical keyboard.
-// The mirror window must be frontmost (the driver focuses it first).
-//
-// usage: pf_key <text>
-import Foundation
-import CoreGraphics
-
-let args = CommandLine.arguments
-guard args.count >= 2 else {
-    FileHandle.standardError.write("usage: pf_key <text>\n".data(using: .utf8)!)
-    exit(2)
-}
-let text = args[1]
-let src = CGEventSource(stateID: .hidSystemState)
-
-// US-ANSI virtual key codes.
-let base: [Character: CGKeyCode] = [
-    "a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,"v":9,"b":11,"q":12,
-    "w":13,"e":14,"r":15,"y":16,"t":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,
-    "=":24,"9":25,"7":26,"-":27,"8":28,"0":29,"]":30,"o":31,"u":32,"[":33,"i":34,
-    "p":35,"l":37,"j":38,"'":39,"k":40,";":41,"\\":42,",":43,"/":44,"n":45,"m":46,
-    ".":47,"`":50," ":49,
-]
-// Characters typed with Shift held.
-let shifted: [Character: CGKeyCode] = [
-    "!":18,"@":19,"#":20,"$":21,"%":23,"^":22,"&":26,"*":28,"(":25,")":29,
-    "_":27,"+":24,"{":33,"}":30,"|":42,":":41,"\"":39,"<":43,">":47,"?":44,"~":50,
-]
-
-func press(_ code: CGKeyCode, shift: Bool) {
-    // Set flags explicitly on every event: a bare event inherits the source's
-    // tracked modifier state, so shift from a previous uppercase char leaks into
-    // the next ones ("TikTok" -> "TikTOK"). Empty flags clears it.
-    let flags: CGEventFlags = shift ? .maskShift : []
-    let down = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: true)
-    down?.flags = flags
-    down?.post(tap: .cghidEventTap)
-    usleep(4_000)
-    let up = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: false)
-    up?.flags = flags
-    up?.post(tap: .cghidEventTap)
-    usleep(12_000)
-}
-
-for ch in text {
-    if let code = base[ch] {
-        press(code, shift: false)
-    } else if let low = Character(ch.lowercased()) as Character?, let code = base[low], ch.isUppercase {
-        press(code, shift: true)                 // uppercase letter
-    } else if let code = shifted[ch] {
-        press(code, shift: true)                 // shifted symbol
-    } else {
-        // Fallback: unicode event (works for the few chars with no US key code).
-        var u = Array(String(ch).utf16)
-        if let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true) {
-            down.keyboardSetUnicodeString(stringLength: u.count, unicodeString: &u); down.post(tap: .cghidEventTap)
-        }
-        usleep(4_000)
-        if let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) {
-            up.keyboardSetUnicodeString(stringLength: u.count, unicodeString: &u); up.post(tap: .cghidEventTap)
-        }
-        usleep(12_000)
-    }
-}
-print("OK")
-"""
-
-SCROLL_SWIFT = r"""// PhoneFlow scroll — a trackpad-style scroll gesture, not a mouse drag.
-//
-// iPhone Mirroring reacts to real trackpad scroll semantics, not to a pressed
-// mouse dragged across the window (that grabs videos, selects text, or does
-// nothing). This posts continuous scroll-wheel events carrying the CGEvent
-// gesture phase fields — MayBegin to wake the handler, Began/Changed while the
-// "finger" moves, Ended on lift, then a decaying momentum tail so feeds and
-// carousels flick to the next page. Modelled on Mirroir's CGEventInput.swift.
-//
-// usage: pf_scroll <midX> <midY> <fingerDX> <fingerDY> [durationMs]
-//   fingerDX/DY is the finger movement in points; content follows the finger.
-import Foundation
-import CoreGraphics
-
-let a = CommandLine.arguments
-guard a.count >= 5,
-      let mx = Double(a[1]), let my = Double(a[2]),
-      let dx = Double(a[3]), let dy = Double(a[4]) else {
-    FileHandle.standardError.write("usage: pf_scroll midX midY fingerDX fingerDY [durationMs]\n".data(using: .utf8)!)
-    exit(2)
-}
-let durationMs = max(min(a.count > 5 ? (Int(a[5]) ?? 260) : 260, 2000), 80)
-
-let amplification = 3.0
-let flickThreshold = 500.0
-let decay = 0.94
-let momentumMax = 90
-let frameMs = 16
-let minDrag = 5
-let warpSettleUs: UInt32 = 100_000
-let frameUs: UInt32 = 16_000
-
-let mid = CGPoint(x: mx, y: my)
-let scrollPhase = CGEventField(rawValue: 99)!
-let momentumPhase = CGEventField(rawValue: 123)!
-let isContinuous = CGEventField(rawValue: 88)!
-let pDeltaY = CGEventField(rawValue: 96)!
-let pDeltaX = CGEventField(rawValue: 97)!
-
-func makeScroll(_ w1: Int32, _ w2: Int32) -> CGEvent? {
-    guard let s = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
-                          wheelCount: 2, wheel1: w1, wheel2: w2, wheel3: 0) else { return nil }
-    s.location = mid
-    s.setIntegerValueField(isContinuous, value: 1)
-    s.setIntegerValueField(pDeltaY, value: Int64(w1))
-    s.setIntegerValueField(pDeltaX, value: Int64(w2))
-    return s
-}
-func emit(_ w1: Int32, _ w2: Int32, phase: Int64, momentum: Int64) {
-    guard let s = makeScroll(w1, w2) else { return }
-    s.setIntegerValueField(scrollPhase, value: phase)
-    s.setIntegerValueField(momentumPhase, value: momentum)
-    s.post(tap: .cghidEventTap)
-}
-
-// Establish the cursor inside the window and wake the scroll subsystem.
-CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: mid, mouseButton: .left)?
-    .post(tap: .cghidEventTap)
-usleep(50_000)
-emit(0, 0, phase: 128, momentum: 0)   // MayBegin
-usleep(warpSettleUs)
-
-// Content follows the finger: wheel sign matches finger delta.
-let totalW1 = dy * amplification
-let totalW2 = dx * amplification
-let seconds = Double(durationMs) / 1000.0
-let velocity = (dx * dx + dy * dy).squareRoot() / max(seconds, 0.001)
-let dragSteps = max(minDrag, durationMs / frameMs)
-let stepDelayUs = UInt32(durationMs) * 1000 / UInt32(dragSteps)
-
-func splitEven(_ total: Double, _ n: Int) -> [Int32] {
-    var out = [Int32](); var acc = 0.0; var placed: Int64 = 0
-    for i in 1...n {
-        acc = total * Double(i) / Double(n)
-        let target = Int64(acc.rounded())
-        out.append(Int32(target - placed)); placed = target
-    }
-    return out
-}
-
-if velocity >= flickThreshold {
-    // Flick: ~30% in the drag phase, ~70% in a decaying momentum tail.
-    let dragW1 = splitEven(totalW1 * 0.3, dragSteps)
-    let dragW2 = splitEven(totalW2 * 0.3, dragSteps)
-    for i in 0..<dragSteps {
-        emit(dragW1[i], dragW2[i], phase: i == 0 ? 1 : 2, momentum: 0)
-        usleep(stepDelayUs)
-    }
-    emit(0, 0, phase: 4, momentum: 0)   // Ended
-    usleep(frameUs)
-    // Momentum: geometric decay carrying the remaining 70%.
-    var remW1 = totalW1 * 0.7, remW2 = totalW2 * 0.7
-    // Peak per-frame velocity ~ remaining * (1-decay)
-    var fW1 = remW1 * (1 - decay), fW2 = remW2 * (1 - decay)
-    for i in 0..<momentumMax {
-        if abs(remW1) < 1 && abs(remW2) < 1 { break }
-        let w1 = Int32(fW1.rounded()), w2 = Int32(fW2.rounded())
-        emit(w1, w2, phase: 0, momentum: i == 0 ? 1 : 2)
-        remW1 -= fW1; remW2 -= fW2; fW1 *= decay; fW2 *= decay
-        usleep(frameUs)
-    }
-    emit(0, 0, phase: 0, momentum: 3)   // momentum End
-} else {
-    // Deliberate drag-scroll: even frames, no momentum.
-    let w1 = splitEven(totalW1, dragSteps), w2 = splitEven(totalW2, dragSteps)
-    for i in 0..<dragSteps {
-        emit(w1[i], w2[i], phase: i == 0 ? 1 : 2, momentum: 0)
-        usleep(stepDelayUs)
-    }
-    emit(0, 0, phase: 4, momentum: 0)   // Ended
-}
-print("OK")
-"""
-
-ICONS_SWIFT = r"""// PhoneFlow icon detection — local CoreML object detector over a screenshot.
-//
-// OCR (pf_ocr) reads text; this finds the tappable ICONS that carry no text —
-// a magnifier, a bell, tab-bar glyphs — which text recognition structurally
-// cannot return. It runs the OmniParser `icon_detect` YOLO (or any Vision
-// object-detection .mlpackage/.mlmodelc) entirely on the Mac, so no frame ever
-// leaves the machine and a step costs tens of milliseconds instead of a cloud
-// round trip. The model is supplied by the owner (see PHONEFLOW_ICON_MODEL);
-// when it is absent the driver simply skips icon detection.
-//
-// Prints one JSON object on stdout, coordinates normalised to the image with a
-// TOP-LEFT origin so it maps exactly like pf_ocr's boxes:
-//   {"w":<px>,"h":<px>,"boxes":[{"nx":cx,"ny":cy,"nw":w,"nh":h,"conf":c}]}
-import Foundation
-import Vision
-import CoreML
-import AppKit
-
-let args = CommandLine.arguments
-guard args.count > 2 else {
-    FileHandle.standardError.write("usage: pf_icons <image> <model.mlpackage|.mlmodelc> [conf]\n".data(using: .utf8)!)
-    exit(2)
-}
-let imagePath = args[1], modelPath = args[2]
-let conf = args.count > 3 ? (Double(args[3]) ?? 0.20) : 0.20
-
-guard let img = NSImage(contentsOfFile: imagePath),
-      let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-    FileHandle.standardError.write("cannot read image\n".data(using: .utf8)!); exit(2)
-}
-let W = Double(cg.width), H = Double(cg.height)
-
-// Compiling a .mlpackage takes ~1.5s, so it is done once and the compiled
-// .mlmodelc is cached beside the model; every later call loads that directly
-// and the whole run is back to tens of milliseconds. A .mlmodelc is used as-is.
-let url = URL(fileURLWithPath: modelPath)
-func compiledURL() -> URL? {
-    if modelPath.hasSuffix(".mlmodelc") { return url }
-    let cache = url.deletingPathExtension().appendingPathExtension("mlmodelc")
-    if FileManager.default.fileExists(atPath: cache.path) { return cache }
-    guard let tmp = try? MLModel.compileModel(at: url) else { return nil }
-    try? FileManager.default.removeItem(at: cache)
-    try? FileManager.default.copyItem(at: tmp, to: cache)
-    return FileManager.default.fileExists(atPath: cache.path) ? cache : tmp
-}
-guard let cURL = compiledURL(),
-      let mlmodel = try? MLModel(contentsOf: cURL),
-      let vnModel = try? VNCoreMLModel(for: mlmodel) else {
-    FileHandle.standardError.write("cannot load model at \(modelPath)\n".data(using: .utf8)!); exit(3)
-}
-
-let req = VNCoreMLRequest(model: vnModel)
-// Letterbox to match YOLO training; Vision reports boxes back in image space.
-req.imageCropAndScaleOption = .scaleFit
-
-try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
-
-var out: [String] = []
-for obs in (req.results as? [VNRecognizedObjectObservation] ?? []) {
-    guard Double(obs.confidence) >= conf else { continue }
-    let b = obs.boundingBox // normalised, bottom-left origin
-    let cx = Double(b.origin.x) + Double(b.width) / 2.0
-    let cy = 1.0 - (Double(b.origin.y) + Double(b.height) / 2.0) // flip to top-left
-    out.append(String(format: "{\"nx\":%.5f,\"ny\":%.5f,\"nw\":%.5f,\"nh\":%.5f,\"conf\":%.3f}",
-                      cx, cy, Double(b.width), Double(b.height), Double(obs.confidence)))
-}
-print("{\"w\":\(Int(W)),\"h\":\(Int(H)),\"boxes\":[\(out.joined(separator: ","))]}")
-"""
-
-OBSERVE_SCRIPT = r"""#!/bin/sh
-# PhoneFlow observation — one round trip instead of fourteen.
-#
-# Capturing a frame used to cost ~14 separate calls through the Plow relay
-# (capture, read, base64, window, crop, OCR, JPEG, read, base64...), each with
-# its own approval and latency, which dominated every step of the agent loop.
-# This does the whole thing on the Mac and prints one JSON object:
-#   {"ocr": <pf_ocr output>, "frame": "<base64 jpeg of the window crop>"}
-#
-# usage: pf_observe.sh <x> <y> <w> <h> <scale> [upscale] [jpegmax]
-set -e
-X=$1; Y=$2; W=$3; H=$4; S=$5; UP=${6:-3}; JMAX=${7:-900}
-D="${TMPDIR:-/tmp}"; F="$D/pf_full.png"; C="$D/pf_win.png"; J="$D/pf_win.jpg"
-screencapture -x "$F"
-# Crop in pixels (the capture is Retina, the window is in points), then upscale:
-# at 316x696pt the tab-bar labels are ~8pt and Vision misses them entirely.
-sips -c "$(echo "$H*$S" | bc | cut -d. -f1)" "$(echo "$W*$S" | bc | cut -d. -f1)" \
-     --cropOffset "$(echo "$Y*$S" | bc | cut -d. -f1)" "$(echo "$X*$S" | bc | cut -d. -f1)" \
-     "$F" --out "$C" >/dev/null
-# -Z sets the LONGEST side, which for a phone window is the height. Passing the
-# width here silently shrank the crop instead of enlarging it, undoing the
-# upscale that lets Vision read the ~8pt tab-bar labels.
-LONG=$(echo "$H*$S*$UP" | bc | cut -d. -f1)
-sips -Z "$LONG" "$C" >/dev/null
-OCR=$("$HOME/.phoneflow/pf_ocr" "$C")
-# Local icon detection over the same crop, only if the owner supplied a model
-# (PHONEFLOW_ICON_MODEL); absent, icons is null and the driver skips them.
-ICON_MODEL="$HOME/.phoneflow/icon_detect.mlpackage"
-ICONS=null
-if [ -e "$ICON_MODEL" ] && [ -x "$HOME/.phoneflow/pf_icons" ]; then
-  ICONS=$("$HOME/.phoneflow/pf_icons" "$C" "$ICON_MODEL" 2>/dev/null || echo null)
-fi
-sips -s format jpeg -s formatOptions 70 -Z "$JMAX" "$C" --out "$J" >/dev/null
-printf '{"ocr":%s,"icons":%s,"frame":"%s"}' "$OCR" "$ICONS" "$(base64 -i "$J")"
-"""
+OCR_SWIFT = _mac_source("pf_ocr.swift")
+DRAG_SWIFT = _mac_source("pf_drag.swift")
+KEY_SWIFT = _mac_source("pf_key.swift")
+SCROLL_SWIFT = _mac_source("pf_scroll.swift")
+IDLE_SWIFT = _mac_source("pf_idle.swift")
+ICONS_SWIFT = _mac_source("pf_icons.swift")
+OBSERVE_SCRIPT = _mac_source("pf_observe.sh")
 
 LOCK_RE = re.compile(r"Passcode|Touch ID|Enter Password|Código|Senha do Mac")
 TITLES = ("iPhone Mirroring", "Espelhamento do iPhone")
@@ -492,6 +71,11 @@ DRAG_BIN = OCR_DIR + "/pf_drag"
 ICONS_BIN = OCR_DIR + "/pf_icons"
 SCROLL_BIN = OCR_DIR + "/pf_scroll"
 KEY_BIN = OCR_DIR + "/pf_key"
+IDLE_BIN = OCR_DIR + "/pf_idle"
+# How long the owner must have left mouse and keyboard alone before an action
+# borrows them, and the longest an action will wait for that gap.
+IDLE_NEED_S = os.environ.get("PHONEFLOW_IDLE_NEED", "0.7")
+IDLE_MAX_S = os.environ.get("PHONEFLOW_IDLE_MAX", "10")
 # Owner-supplied CoreML icon detector (OmniParser icon_detect or similar).
 ICON_MODEL = OCR_DIR + "/icon_detect.mlpackage"
 _UNSET = object()
@@ -810,27 +394,114 @@ class LatchDriver:
         except Exception:
             return False
 
-    def _focus(self) -> None:
-        """Bring the mirror window frontmost before sending keystrokes.
+    SETTINGS_PANES = {
+        "screenRecording": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        "accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        "automation": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+    }
 
-        `keystroke` goes to whatever app is frontmost on the Mac, not to a
-        window we name — so without this an open_app/type_text would be typed
-        into whatever the owner happened to have in front.
+    def open_settings(self, pane: str) -> None:
+        """Open one Privacy pane on the owner's Mac, so they only have to flip
+        the switch instead of finding it."""
+        if pane not in self.SETTINGS_PANES:
+            raise DriverError("unknown_pane", f"no such settings pane: {pane!r}")
+        self._applescript('do shell script "open \'%s\'"' % self.SETTINGS_PANES[pane])
+
+    def doctor(self) -> dict:
+        """What is and is not ready on the Mac, probed rather than assumed.
+
+        Answers {check: True | False | None} plus "detail" strings; None means
+        "could not be checked because an earlier thing is missing". Nothing here
+        raises: a doctor that crashes on a sick patient is no use.
         """
-        src = (
-            'tell application "System Events" to set frontmost of '
-            'application process "iPhone Mirroring" to true'
-        )
-        self.scripts.append(src)
-        self._applescript(src)
+        out: dict = {"latch": self.health(), "helpers": None, "accessibility": None,
+                     "screenRecording": None, "automation": None, "mirrorWindow": None,
+                     "detail": {}}
+        if not out["latch"]:
+            return out
+        try:
+            self._ensure_ocr()
+            out["helpers"] = True
+        except Exception as exc:  # noqa: BLE001
+            out["helpers"] = False
+            out["detail"]["helpers"] = str(exc)[:300]
+        if out["helpers"]:
+            try:
+                perms = json.loads(self._applescript('do shell script "%s perms"' % IDLE_BIN))
+                out["accessibility"] = bool(perms.get("accessibility"))
+                out["screenRecording"] = bool(perms.get("screenRecording"))
+            except Exception as exc:  # noqa: BLE001
+                out["detail"]["permissions"] = str(exc)[:300]
+        try:
+            self._window()
+            out["automation"] = True
+            out["mirrorWindow"] = True
+        except DriverError as exc:
+            text = str(exc)
+            if exc.code == "mirror_window_missing":
+                out["automation"] = True
+                out["mirrorWindow"] = False
+            elif re.search(r"-1743|not authori[sz]ed|Not authori[sz]ed", text):
+                out["automation"] = False
+            elif re.search(r"-1719|-25211|assistive", text):
+                out["automation"] = True
+                out["accessibility"] = False
+            else:
+                out["detail"]["mirrorWindow"] = text[:300]
+        except Exception as exc:  # noqa: BLE001
+            out["detail"]["mirrorWindow"] = str(exc)[:300]
+        return out
+
+    def _act(self, src: str) -> None:
+        """Run one input action on the mirror, politely.
+
+        iPhone Mirroring only reacts to events that travel through the Mac's
+        real cursor and keyboard focus (posting straight to its process was
+        tried, for clicks, drags and scrolls, focused and not: the phone never
+        saw any of them). So the owner's pointer and focus ARE borrowed, and the
+        job here is to borrow them for as short a time as possible:
+
+          1. wait until the owner has been idle for a moment (pf_idle), so the
+             pointer is not yanked out of their hand mid-gesture and their
+             keystrokes are not typed into the phone;
+          2. remember which app was in front, bring the mirror forward — an
+             unfocused mirror window eats the first click to raise itself, and
+             `keystroke` goes to whatever is frontmost;
+          3. do the action;
+          4. give the focus back (the click helpers already put the pointer
+             back where it was).
+
+        One AppleScript, so the whole borrow is one Latch round trip.
+        """
+        restore = os.environ.get("PHONEFLOW_RESTORE_FOCUS", "1") != "0"
+        lines = [
+            'do shell script "test -x %s && %s %s %s || true"' % (IDLE_BIN, IDLE_BIN, IDLE_NEED_S, IDLE_MAX_S),
+            'tell application "System Events" to set pfPrev to name of first application process whose frontmost is true',
+            'tell application "System Events" to set frontmost of application process "iPhone Mirroring" to true',
+            "delay 0.15",
+            src.strip("\n"),
+        ]
+        if restore:
+            lines += [
+                'if pfPrev is not "iPhone Mirroring" then',
+                "  try",
+                '    tell application "System Events" to set frontmost of application process pfPrev to true',
+                "  end try",
+                "end if",
+            ]
+        full = "\n".join(lines)
+        if self.scripts and self.scripts[-1] == src:
+            self.scripts[-1] = full
+        else:
+            self.scripts.append(full)
+        self._applescript(full)
 
     def open_app(self, app: str) -> None:
         src = open_app_script(app)
         self.commands.append(("open_app", app))
         self.scripts.append(src)
         self._ensure_ocr()  # builds pf_key, used to type the app name
-        self._focus()
-        self._applescript(src)
+        self._act(src)
 
     def screenshot(self) -> bytes:
         # plow_run_command runs inside Latch's seatbelt sandbox, where
@@ -881,6 +552,7 @@ class LatchDriver:
             (ICONS_BIN, OCR_DIR + "/pf_icons.swift", ICONS_SWIFT),
             (SCROLL_BIN, OCR_DIR + "/pf_scroll.swift", SCROLL_SWIFT),
             (KEY_BIN, OCR_DIR + "/pf_key.swift", KEY_SWIFT),
+            (IDLE_BIN, OCR_DIR + "/pf_idle.swift", IDLE_SWIFT),
         ):
             # Keyed on the source, not on the binary's existence: a Mac that
             # built an earlier pf_ocr would otherwise keep it forever, and a
@@ -892,6 +564,8 @@ class LatchDriver:
             ).strip()
             if probe == "yes":
                 continue
+            if self._install_prebuilt(binary, stamp):
+                continue
             self._call("plow_write_file", {"path": self._on_mac(source), "content": code})
             try:
                 self._applescript(
@@ -901,6 +575,46 @@ class LatchDriver:
             except DriverError as exc:
                 raise DriverError("ocr_unavailable", f"could not build {binary}: {exc}") from exc
         self._ocr_ready = True
+
+    def _install_prebuilt(self, binary: str, stamp: str) -> bool:
+        """Ship the checked-in binary for this helper to the Mac, if one matches.
+
+        mac/bin/ holds universal builds of every helper (mac/build.sh), so a new
+        Mac needs neither the Xcode Command Line Tools nor a minute of swiftc
+        before its first tap. A prebuilt binary is used only when the manifest
+        says it was built from exactly the source this driver carries; anything
+        else — no manifest, a stale entry, a failed copy, a checksum mismatch —
+        answers False and the caller compiles from source as before.
+
+        plow_write_file carries text, so the binary crosses as base64 and the
+        Mac decodes it and checks its sha256 before marking it installed.
+        """
+        name = os.path.basename(binary)
+        try:
+            with open(os.path.join(_mac_dir(), "bin", "manifest.json"), encoding="utf-8") as fh:
+                entry = json.load(fh).get(name) or {}
+            if entry.get("src") != stamp or not re.fullmatch(r"[0-9a-f]{64}", entry.get("sha256", "")):
+                return False
+            with open(os.path.join(_mac_dir(), "bin", name), "rb") as fh:
+                blob = fh.read()
+        except (OSError, ValueError):
+            return False
+        if hashlib.sha256(blob).hexdigest() != entry["sha256"]:
+            return False
+        staged = binary + ".b64"
+        try:
+            self._applescript('do shell script "mkdir -p %s"' % OCR_DIR)
+            self._call("plow_write_file",
+                       {"path": self._on_mac(staged), "content": base64.b64encode(blob).decode("ascii")})
+            out = self._applescript(
+                'do shell script "base64 -D -i %s -o %s && rm -f %s && '
+                'test \\"$(shasum -a 256 %s | cut -d\' \' -f1)\\" = %s && '
+                'chmod +x %s && echo %s > %s.sha && echo yes || echo no"'
+                % (staged, binary, staged, binary, entry["sha256"], binary, stamp, binary)
+            ).strip()
+        except DriverError:
+            return False
+        return out == "yes"
 
     OCR_UPSCALE = 3
 
@@ -1073,11 +787,10 @@ class LatchDriver:
         # Focus first, then click, or every tap is spent on the window instead of
         # the phone.
         self._ensure_ocr()
-        self._focus()
         src = 'do shell script "%s %d %d"' % (DRAG_BIN, int(x), int(y))
         self.commands.append(("tap_point", x, y))
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
 
     def frame_for_model(self, max_px: int = 900) -> bytes:
         """A downscaled copy of the last capture, for sending to a vision model.
@@ -1106,11 +819,10 @@ class LatchDriver:
         """Press and hold — how iOS opens context menus."""
         self._bounds_check(x, y)
         self._ensure_ocr()
-        self._focus()
         src = 'do shell script "%s %d %d %d"' % (DRAG_BIN, int(x), int(y), hold_ms)
         self.commands.append(("long_press", x, y))
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
 
     def swipe_from(self, x: float, y: float, direction: str, distance: float = 0.5) -> None:
         """Swipe starting at one point on screen rather than through the centre.
@@ -1126,14 +838,13 @@ class LatchDriver:
         dy = span[1] * size[1] * distance
         self.commands.append(("swipe_from", x, y, direction))
         self._ensure_ocr()
-        self._focus()
         # Trackpad-style scroll, not a mouse drag: the drag grabs videos and
         # selects text; a scroll-wheel gesture with phase + momentum flicks the
         # feed the way a finger does. dx/dy is the finger movement; content
         # follows it, and pf_scroll amplifies to real content distance.
         src = 'do shell script "%s %d %d %d %d 220"' % (SCROLL_BIN, int(x), int(y), int(dx), int(dy))
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
 
     def system_key(self, button: str) -> None:
         """Home / App Switcher / Spotlight, via iPhone Mirroring's own shortcuts.
@@ -1145,10 +856,9 @@ class LatchDriver:
         if button not in codes:
             raise DriverError("unknown_button", f"no such system button: {button!r}")
         self.commands.append(("system_key", button))
-        self._focus()
         src = 'tell application "System Events" to key code %d using command down' % codes[button]
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
 
     def reset_app(self, app: str) -> None:
         """Force-quit the foreground app and reopen it — the way out of a stuck
@@ -1163,10 +873,9 @@ class LatchDriver:
         top = pos[1] + self.titlebar_px
         y1 = int(top + (size[1] - self.titlebar_px) * 0.65)
         y2 = int(top + (size[1] - self.titlebar_px) * 0.10)
-        self._focus()
         src = 'do shell script "%s %d %d %d %d 400"' % (DRAG_BIN, cx, y1, cx, y2)
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
         time.sleep(0.4)
         self.system_key("home")
         time.sleep(0.3)
@@ -1183,11 +892,10 @@ class LatchDriver:
         y = pos[1] + size[1] * 0.5
         self.commands.append(("back",))
         self._ensure_ocr()
-        self._focus()
         src = 'do shell script "%s %d %d %d %d 300"' % (
             DRAG_BIN, int(pos[0] + 3), int(y), int(pos[0] + size[0] * 0.6), int(y))
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
 
     def tap_label(self, label: str) -> None:
         self.commands.append(("tap_label", label))
@@ -1218,11 +926,10 @@ class LatchDriver:
         """
         self.commands.append(("drag", x1, y1, x2, y2))
         self._ensure_ocr()
-        self._focus()
         src = 'do shell script "%s %d %d %d %d %d"' % (
             DRAG_BIN, int(x1), int(y1), int(x2), int(y2), max(duration_ms, 200))
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
 
     def swipe(self, frm: dict, to: dict, duration_ms: int) -> None:
         _, _, pos, size = self._window()
@@ -1233,14 +940,13 @@ class LatchDriver:
         x1, y1 = _abs(frm)
         x2, y2 = _abs(to)
         self.commands.append(("swipe", frm, to, duration_ms))
-        self._focus()  # an unfocused window eats the press, same as taps
         self._ensure_ocr()
         # Trackpad scroll from the midpoint; the finger delta is (to - from).
         mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         src = 'do shell script "%s %d %d %d %d %d"' % (
             SCROLL_BIN, int(mx), int(my), int(x2 - x1), int(y2 - y1), max(duration_ms, 200))
         self.scripts.append(src)
-        self._applescript(src)
+        self._act(src)
 
     def type_text(self, text: str) -> None:
         self.commands.append(("type_text", text))
@@ -1250,8 +956,7 @@ tell application "System Events"
 end tell
 '''
         self.scripts.append(src)
-        self._focus()
-        self._applescript(src)
+        self._act(src)
     def vault_fill(self, vault_item_id: str) -> str:
         # spec §11: the fill is manual; the owner completes the Mac auth prompt
         # and then Approves in the canvas.

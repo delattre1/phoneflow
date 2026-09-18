@@ -14,14 +14,19 @@ COPY LICENSE /usr/share/doc/phoneflow/LICENSE
 COPY pf-run/    /opt/hermes/skills/pf-run/
 COPY pf-mirror/ /opt/hermes/skills/pf-mirror/
 COPY pf-setup/  /opt/hermes/skills/pf-setup/
+COPY pf-hints/  /opt/hermes/skills/pf-hints/
 COPY --chown=10000:10000 pf-run/    /var/lib/hermes/skills/pf-run/
 COPY --chown=10000:10000 pf-mirror/ /var/lib/hermes/skills/pf-mirror/
 COPY --chown=10000:10000 pf-setup/  /var/lib/hermes/skills/pf-setup/
+COPY --chown=10000:10000 pf-hints/  /var/lib/hermes/skills/pf-hints/
 COPY pf_api/    /opt/phoneflow/pf_api/
 COPY pf_mirror/ /opt/phoneflow/pf_mirror/
 COPY --from=web /web/dist/ /opt/phoneflow/web/
 COPY workflows/ /opt/phoneflow/workflows/
 COPY app_hints/ /opt/phoneflow/app_hints/
+# Mac helper sources and their prebuilt universal binaries (mac/build.sh); the
+# driver ships them to the owner's Mac through Latch.
+COPY mac/       /opt/phoneflow/mac/
 
 RUN find /opt/hermes/skills -mindepth 1 -type d -exec chmod 0755 {} + \
  && find /opt/hermes/skills -mindepth 1 -type f ! -perm -u+x -exec chmod 0644 {} + \

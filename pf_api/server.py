@@ -19,8 +19,9 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
+from pf_api import doctor, settings
 from pf_api.interpreter import Interpreter
 from pf_api.schema import SchemaError, validate_workflow
 from pf_api.store import (
@@ -42,6 +43,7 @@ _RUN_EVENTS = re.compile(r"^/api/runs/([^/]+)/events$")
 _RUN_FRAME = re.compile(r"^/api/runs/([^/]+)/frames/([^/]+)$")
 _RUN_CONFIRM = re.compile(r"^/api/runs/([^/]+)/confirm$")
 _RUN_CANCEL = re.compile(r"^/api/runs/([^/]+)/cancel$")
+_HINT = re.compile(r"^/api/hints/([^/]+)$")
 
 
 def _now() -> str:
@@ -146,6 +148,23 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             latch = "up" if self.server.latch_ok() else "down"
             self._send(200, {"ok": True, "latch": latch})
             return
+        if path == "/api/doctor":
+            self._send(200, doctor.run(self.server.driver))
+            return
+        if path == "/api/config":
+            self._send(200, settings.public_config(self._home()))
+            return
+        if path == "/api/hints":
+            self._send(200, settings.list_hints())
+            return
+        m = _HINT.match(path)
+        if m:
+            hint = settings.read_hint(unquote(m.group(1)))
+            if hint is None:
+                self._send(404, {"code": "not_found", "message": "no hint for that app"})
+                return
+            self._send(200, hint)
+            return
         if path == "/api/workflows":
             self._send(200, list_workflows(self._home()))
             return
@@ -212,6 +231,9 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         if not self._origin_ok():
             return
+        if self._path() == "/api/config" or _HINT.match(self._path()):
+            self._put_setting()
+            return
         m = _WF_ID.match(self._path())
         if not m:
             self._send(404, {"code": "not_found", "message": "no such route"})
@@ -237,8 +259,61 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
         save_workflow(self._home(), out)
         self._send_empty(200)
 
+    def _put_setting(self) -> None:
+        """PUT /api/config {llmApiKey?, llmBaseUrl?, agentModel?, blockedApps?}
+        and PUT /api/hints/<app> {"text": "..."} — the owner's own settings."""
+        try:
+            doc = self._read_json()
+        except json.JSONDecodeError:
+            self._send(400, {"code": "validation", "path": "$", "message": "invalid json"})
+            return
+        if not isinstance(doc, dict):
+            self._send(400, {"code": "validation", "path": "$", "message": "body must be an object"})
+            return
+        m = _HINT.match(self._path())
+        try:
+            if m:
+                out = settings.write_hint(self._home(), unquote(m.group(1)), doc.get("text"))
+            else:
+                out = settings.save_config(self._home(), doc)
+        except ValueError as exc:
+            self._send(400, {"code": "validation", "path": "$", "message": str(exc)})
+            return
+        self._send(200, out)
+
+    def _open_pane(self) -> None:
+        """POST /api/doctor/open {"pane": "screenRecording"|"accessibility"|"automation"}
+        opens that Privacy pane on the owner's Mac."""
+        try:
+            pane = (self._read_json() or {}).get("pane")
+        except json.JSONDecodeError:
+            pane = None
+        opener = getattr(self.server.driver, "open_settings", None)
+        if opener is None:
+            self._send(200, {"opened": False, "message": "this driver has no Mac to open settings on"})
+            return
+        try:
+            opener(pane)
+        except Exception as exc:  # noqa: BLE001
+            self._send(400, {"code": getattr(exc, "code", "open_failed"), "message": str(exc)[:300]})
+            return
+        self._send(200, {"opened": True, "pane": pane})
+
     def do_DELETE(self):
         if not self._origin_ok():
+            return
+        m = _HINT.match(self._path())
+        if m:
+            try:
+                gone = settings.delete_hint(self._home(), unquote(m.group(1)))
+            except ValueError as exc:
+                self._send(400, {"code": "validation", "path": "$", "message": str(exc)})
+                return
+            if not gone:
+                self._send(404, {"code": "not_found", "message": "no owner hint for that app"})
+                return
+            self.send_response(204)
+            self.end_headers()
             return
         m = _WF_ID.match(self._path())
         if not m:
@@ -256,6 +331,9 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
         path = self._path()
         if path == "/api/runs":
             self._start_run()
+            return
+        if path == "/api/doctor/open":
+            self._open_pane()
             return
         m = _RUN_CONFIRM.match(path)
         if m:
@@ -404,6 +482,9 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
 
 def make_server(home, driver, latch_ok, host="127.0.0.1", port=0):
     home = Path(home)
+    # settings (owner hints, config.json) resolve against the same home the
+    # server stores runs in, whatever the environment said before.
+    os.environ["PHONEFLOW_HOME"] = str(home)
     ensure_seeded(home)
 
     class BoundServer(ThreadingHTTPServer):

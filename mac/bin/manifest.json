@@ -1,0 +1,8 @@
+{
+  "pf_drag": {"src": "f1c82e51469e0a9c", "sha256": "afd71e24e49826778fe9cbf1b248a03ae073e896ce0528e6405b3abdd0378e8e"},
+  "pf_icons": {"src": "82b1f7f9a60d1b19", "sha256": "57de9435afcaaaf4a5a262fcd680e53ccc3c70829b4e94ffc77a590848b61c3b"},
+  "pf_idle": {"src": "789594d15b22a255", "sha256": "c52e41edc522f880ecd6597dd8964633455e9764077cbaea45afdd29841a0f34"},
+  "pf_key": {"src": "efef6420105568ea", "sha256": "b7af454c0315ce7fd49e9d4cde2cf2e030df8f7fcd2483a3c0d9926aac430d83"},
+  "pf_ocr": {"src": "183db87b3ad8dc57", "sha256": "5acdd252cea8a94fdfaef2073b28dceb1ebd344c61da7d26e523f9cdbdffa49b"},
+  "pf_scroll": {"src": "382c87d43f877835", "sha256": "6aae46fe3228caf63a6c2ccef0ed7d1ce006fb4f67e5dc3dccd2dfe9c5dafbbc"}
+}

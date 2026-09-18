@@ -48,7 +48,7 @@ names in `PHONEFLOW_BLOCKED_APPS`, which is empty by default.
 | Where | What |
 |---|---|
 | Agent host | Docker with the compose plugin, and the [`plow-agents`](https://github.com/plow-pbc/plow-agents) tooling |
-| Mac | macOS 15 or later on Apple Silicon, Plow **Latch**, **iPhone Mirroring** paired with the iPhone, Xcode Command Line Tools |
+| Mac | macOS 15 or later, Plow **Latch**, **iPhone Mirroring** paired with the iPhone. Xcode Command Line Tools only as a fallback |
 | iPhone | Any iPhone that supports iPhone Mirroring, signed in to the same Apple Account as the Mac |
 | Accounts | A Plow account with a line, and an API key for an OpenAI-compatible LLM endpoint |
 
@@ -56,11 +56,9 @@ names in `PHONEFLOW_BLOCKED_APPS`, which is empty by default.
 
 ### Step 1. Prepare the Mac
 
-1. **Install the Xcode Command Line Tools.** PhoneFlow compiles its small Swift
-   helpers on the Mac with `swiftc`, so the tools must be present:
-   ```sh
-   xcode-select --install
-   ```
+1. **Nothing to compile.** The Mac helpers ship prebuilt, so the Xcode Command
+   Line Tools are optional. They are only a fallback (`xcode-select --install`)
+   if a prebuilt helper cannot be used.
 2. **Install Plow Latch**, open it, sign in, and leave it running. Latch is the
    bridge the agent uses to run actions on your Mac.
 3. **Pair iPhone Mirroring.** Open the iPhone Mirroring app, pair it with your
@@ -99,9 +97,10 @@ plow-agents login          # authenticate to Plow
 plow-agents lines          # list your lines
 plow-agents mint ln_xxx    # writes ./plow-credentials next to compose.yml
 
-export PHONEFLOW_LLM_API_KEY=...                       # your LLM key
-export PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # default
-export PHONEFLOW_AGENT_MODEL=glm-5.3-flash            # default planner
+# optional — empty, the planner runs on the agent's own Plow model credits
+# export PHONEFLOW_LLM_API_KEY=...                     # your own LLM key
+# export PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1 # its endpoint
+export PHONEFLOW_AGENT_MODEL=glm-5.3                  # default planner
 
 docker compose up --build -d
 ```
@@ -191,11 +190,7 @@ The agent replies with what it found.
 ## The Mac helpers
 
 iPhone Mirroring ignores most synthetic input, so PhoneFlow ships a set of small
-helpers that run on the Mac. **You never install them by hand.** On first use
-the driver writes each source file to `~/.phoneflow/` through Latch, compiles it
-with `xcrun swiftc -O`, and stores a hash of the source next to the binary. When
-a helper changes in this repo, the hash no longer matches and it is rebuilt
-automatically. The first run costs about a minute while they compile.
+helpers that run on the Mac. **You never install them by hand**, and a new Mac does not need Xcode. Universal prebuilt binaries are checked in under [`mac/bin/`](mac/bin) (built by `sh mac/build.sh`); on first use the driver ships each one to `~/.phoneflow/` through Latch and verifies its sha256. Only when no prebuilt binary matches the helper's source does it fall back to compiling with `xcrun swiftc -O`, which needs the Xcode Command Line Tools. A hash of the source sits next to each binary, so a helper that changes in the repo is replaced automatically.
 
 | Helper | What it does |
 |---|---|
@@ -205,6 +200,7 @@ automatically. The first run costs about a minute while they compile.
 | [`pf_drag.swift`](mac/pf_drag.swift) | Real CoreGraphics mouse events: click, long press and drag. |
 | [`pf_scroll.swift`](mac/pf_scroll.swift) | Trackpad-style scroll gesture with phases and a momentum tail, so feeds and carousels flick to the next page. A plain mouse drag does not work in the mirror. |
 | [`pf_key.swift`](mac/pf_key.swift) | Types text with real US-ANSI virtual key codes. iPhone Mirroring does not forward Unicode-only key events. |
+| [`pf_idle.swift`](mac/pf_idle.swift) | Waits for a pause in your own mouse and keyboard use before each action. Also reports which macOS permissions Latch holds, for the setup doctor. |
 
 Two constraints shaped this design:
 
@@ -242,9 +238,9 @@ anyway.
 Configure the model through the environment (any OpenAI-compatible endpoint):
 
 ```sh
-PHONEFLOW_LLM_API_KEY=...                      # required for agent.task only
-PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # default
-PHONEFLOW_AGENT_MODEL=glm-5.3-flash            # default; must support vision + tools
+PHONEFLOW_LLM_API_KEY=...                      # optional; empty = the agent's Plow credits
+PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # only with your own key
+PHONEFLOW_AGENT_MODEL=glm-5.3                  # default; must support vision + tools
 ```
 
 Graph-only workflows run without any of these. Try `wf_youtube_trending` first —
@@ -264,9 +260,9 @@ Set these in the environment before `docker compose up`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHONEFLOW_LLM_API_KEY` | none | Key for the planner. Required for plain-language tasks and `agent.task` nodes. |
-| `PHONEFLOW_LLM_BASE_URL` | `https://ollama.com/v1` | Any OpenAI-compatible endpoint. |
-| `PHONEFLOW_AGENT_MODEL` | `glm-5.3-flash` | Planner model. Must support vision and tools. Use `kimi-k3` for harder tasks. |
+| `PHONEFLOW_LLM_API_KEY` | none | Your own key for the planner. Empty, an agent provisioned by Plow plans on its own Plow model credits (`PLOW_API_BASE`, agent token). Can also be set by chat (`PUT /api/config`). |
+| `PHONEFLOW_LLM_BASE_URL` | `https://ollama.com/v1` | Endpoint for your own key. Any OpenAI-compatible one. Model names are matched to what the endpoint lists (`glm-5.3` → `z-ai/glm-5.3`). |
+| `PHONEFLOW_AGENT_MODEL` | `glm-5.3` | Planner model. Must support vision and tools. Use `kimi-k3` for harder tasks. |
 | `PHONEFLOW_GROUNDER_MODEL` | `qwen3.5:397b` | Cloud grounder used for icons when the local model is absent. |
 | `PHONEFLOW_BLOCKED_APPS` | empty | Comma list of app names the agent must refuse, for example `"C6,Nubank,Wallet"`. Case-insensitive substring match. |
 | `MIRROR_TITLEBAR_PX` | `28` | Title bar height subtracted from window-local clicks. |
@@ -286,13 +282,9 @@ Set these in the environment before `docker compose up`.
 
 ## Good to know
 
-- **The cursor is shared.** A run moves the Mac's real pointer, because iPhone
-  Mirroring only reacts to real mouse events. The cursor is returned after each
-  click, but you cannot use the mouse during a run.
-- **App knowledge is extensible.** Files in [`app_hints/`](app_hints) teach the
-  agent an app's layout, renamed features and popups. Bundled: Gmail, Instagram,
-  Safari, Settings, Spotify, TikTok, WhatsApp, X and YouTube. Add your own by
-  dropping in a new `.md` file.
+- **The cursor is borrowed, politely.** iPhone Mirroring only reacts to the Mac's real pointer and keyboard focus. Posting events straight to its process does not work: we tested clicks, drags and scrolls, focused and not, and other projects document the same. So each action waits for a short pause in your own mouse and keyboard use (`PHONEFLOW_IDLE_NEED`, default 0.7 s, giving up after `PHONEFLOW_IDLE_MAX`, default 10 s), brings the mirror forward, acts, then returns the pointer and the focus to the app you were in. You can keep working during a run, with brief interruptions. For zero interference, run Latch and iPhone Mirroring on a spare Mac.
+- **App knowledge is extensible, by chat.** App hints teach the agent an app's layout, renamed features and popups. Bundled: Gmail, Instagram, Safari, Settings, Spotify, TikTok, WhatsApp, X and YouTube. Tell the agent what it should know ("in Instagram the Reels tab is the middle one") and it saves a note on your own install, which wins over the bundled one. Same thing over the API: `GET/PUT/DELETE /api/hints/<app>`. Developers can still drop a `.md` file in [`app_hints/`](app_hints).
+- **Setup is checked, not assumed.** `GET /api/doctor` probes Latch, the helpers, each macOS permission, the mirror window and the LLM key, and names the next thing to fix. On your first message the agent walks you through it one step at a time and opens the right Settings page on the Mac. The LLM key and blocked apps can be set by chat too (`PUT /api/config`); they are stored on the agent's volume and override the environment.
 - **No phone-side setup.** No Developer Mode, no WebDriverAgent, no signing.
   That is also why apps that block automation may not work.
 - **Smoke test.** Run the bundled Settings workflow from the canvas with the
