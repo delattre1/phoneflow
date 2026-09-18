@@ -121,7 +121,15 @@ def llm_base_url() -> str:
 
 
 def grounder_model() -> str:
-    return os.environ.get("PHONEFLOW_GROUNDER_MODEL", "qwen3.5:397b")
+    """The cloud icon grounder. PHONEFLOW_GROUNDER_MODEL=off turns it off (OCR
+    + the local CoreML model stay); empty or "auto" picks the provider default,
+    which is off on Plow's gateway since it serves no grounding model."""
+    explicit = (os.environ.get("PHONEFLOW_GROUNDER_MODEL") or "").strip()
+    if explicit.lower() in ("off", "none"):
+        return ""
+    if explicit and explicit.lower() != "auto":
+        return explicit
+    return "" if llm_provider() == "plow" else OWN_GROUNDER
 
 
 def list_models(client) -> list[str] | None:
@@ -212,9 +220,19 @@ def resolve_model(client, wanted: str, available: list[str] | None = None) -> st
     return wanted
 
 
+# Plow's gateway only serves the models it allows an agent (probed 2026-09-18:
+# anthropic/claude-sonnet-5 and moonshotai/kimi-k3 answered; every spelling of
+# GLM and Qwen came back "not allowed"), so the defaults follow the provider.
+PLOW_PLANNER = "anthropic/claude-sonnet-5"
+OWN_PLANNER = "glm-5.3"
+OWN_GROUNDER = "qwen3.5:397b"
+
+
 def agent_model() -> str:
-    return (load_config().get("agentModel")
-            or os.environ.get("PHONEFLOW_AGENT_MODEL") or "glm-5.3")
+    explicit = load_config().get("agentModel") or os.environ.get("PHONEFLOW_AGENT_MODEL")
+    if explicit:
+        return explicit
+    return PLOW_PLANNER if llm_provider() == "plow" else OWN_PLANNER
 
 
 def blocked_apps() -> list[str]:

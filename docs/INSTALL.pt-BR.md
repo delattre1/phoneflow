@@ -44,7 +44,7 @@ dos apps em `PHONEFLOW_BLOCKED_APPS`, que vem vazia por padrão.
   Line Tools** (`xcode-select --install`) são só um plano B.
 - **Um modelo pro planner.** Um agente instalado pelo Plow já tem: o planner usa
   os créditos de modelo do próprio agente (o mesmo gateway do agente de chat),
-  modelo padrão `glm-5.3`. Opcionalmente use sua própria chave de um endpoint
+  modelo padrão `anthropic/claude-sonnet-5` (o gateway do Plow não libera GLM nem Qwen). Opcionalmente use sua própria chave de um endpoint
   compatível com OpenAI em `PHONEFLOW_LLM_API_KEY` (e `PHONEFLOW_LLM_BASE_URL`,
   padrão `https://ollama.com/v1`), ou pelo chat.
 
@@ -68,7 +68,7 @@ plow-agents mint ln_xxx    # grava ./plow-credentials ao lado do compose.yml
 # opcional — vazio, o planner roda nos créditos Plow do próprio agente:
 # export PHONEFLOW_LLM_API_KEY=sk-...                  # sua chave OpenAI-compatível
 export PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1    # padrão
-export PHONEFLOW_AGENT_MODEL=glm-5.3                   # planner padrão
+# export PHONEFLOW_AGENT_MODEL=...                     # planner (o padrão segue o provedor)
 
 docker compose up --build -d
 ```

@@ -44,7 +44,7 @@ instruction, not a hard block: for an enforced refusal, list the app names in
   Line Tools** (`xcode-select --install`) are only a fallback.
 - **A model for the planner.** An agent installed through Plow already has one:
   the planner uses the agent's own Plow model credits (the same gateway the chat
-  agent uses), default model `glm-5.3`. Optionally bring your own key for an
+  agent uses), default model `anthropic/claude-sonnet-5` (Plow's gateway does not allow GLM or Qwen). Optionally bring your own key for an
   OpenAI-compatible endpoint with `PHONEFLOW_LLM_API_KEY` (and
   `PHONEFLOW_LLM_BASE_URL`, default `https://ollama.com/v1`), or by chat.
 
@@ -68,7 +68,7 @@ plow-agents mint ln_xxx    # writes ./plow-credentials next to compose.yml
 # optional — empty, the planner runs on the agent's own Plow model credits:
 # export PHONEFLOW_LLM_API_KEY=sk-...          # your own OpenAI-compatible key
 export PHONEFLOW_LLM_BASE_URL=https://ollama.com/v1   # default
-export PHONEFLOW_AGENT_MODEL=glm-5.3          # default planner (kimi-k3 for harder tasks)
+# export PHONEFLOW_AGENT_MODEL=...              # planner override (default follows the provider)
 
 docker compose up --build -d
 ```

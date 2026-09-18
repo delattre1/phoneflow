@@ -262,8 +262,8 @@ Set these in the environment before `docker compose up`.
 |---|---|---|
 | `PHONEFLOW_LLM_API_KEY` | none | Your own key for the planner. Empty, an agent provisioned by Plow plans on its own Plow model credits (`PLOW_API_BASE`, agent token). Can also be set by chat (`PUT /api/config`). |
 | `PHONEFLOW_LLM_BASE_URL` | `https://ollama.com/v1` | Endpoint for your own key. Any OpenAI-compatible one. Model names are matched to what the endpoint lists (`glm-5.3` → `z-ai/glm-5.3`). |
-| `PHONEFLOW_AGENT_MODEL` | `glm-5.3` | Planner model. Must support vision and tools. Use `kimi-k3` for harder tasks. |
-| `PHONEFLOW_GROUNDER_MODEL` | `qwen3.5:397b` | Cloud grounder used for icons when the local model is absent. |
+| `PHONEFLOW_AGENT_MODEL` | provider default | Planner model; it reads the screenshots, so it must support vision and tools. `anthropic/claude-sonnet-5` on Plow credits (the gateway also serves `moonshotai/kimi-k3`; GLM and Qwen are not allowed there), `glm-5.3` with your own key. |
+| `PHONEFLOW_GROUNDER_MODEL` | provider default | Cloud grounder used for icons when the local model is absent. `qwen3.5:397b` with your own key, off on Plow credits (its gateway serves no grounding model); `off` disables it. |
 | `PHONEFLOW_BLOCKED_APPS` | empty | Comma list of app names the agent must refuse, for example `"C6,Nubank,Wallet"`. Case-insensitive substring match. |
 | `MIRROR_TITLEBAR_PX` | `28` | Title bar height subtracted from window-local clicks. |
 | `PLOW_CREDENTIALS` | `./plow-credentials` | Path of the credential file minted by `plow-agents`. |

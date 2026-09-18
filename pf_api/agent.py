@@ -53,13 +53,13 @@ MAX_TOKENS = int(os.environ.get("PHONEFLOW_AGENT_MAX_TOKENS", "8000"))
 # Icon grounding. OCR cannot see a magnifier or a bell, and every run so far has
 # died on exactly that. The Qwen-VL family is trained to return bounding boxes,
 # so a second, cheaper pass over the window crop turns icons into list items.
-# Set PHONEFLOW_GROUNDER_MODEL="" to disable.
+# Set PHONEFLOW_GROUNDER_MODEL=off to disable.
 # Split by what each role actually needs. Planning is judgement, and the fast
 # model does it in ~7s against ~40s. Grounding is precision, and there the split
 # is stark: measured against OCR ground truth on the same frame, qwen3.5 lands
 # within 2pt while glm-5.3-flash is 76pt and kimi-k3 422pt out — against a 44pt
 # tap target, which means those two simply miss the icon they aimed at.
-GROUNDER_MODEL = os.environ.get("PHONEFLOW_GROUNDER_MODEL", "qwen3.5:397b")
+GROUNDER_MODEL = os.environ.get("PHONEFLOW_GROUNDER_MODEL", "qwen3.5:397b")  # tests/back-compat; runtime asks settings.grounder_model()
 # The grounder is a reasoning model too: its thinking is billed against this
 # budget and comes before the JSON, so a tight cap returns an empty reply with
 # finish_reason "length" and no icons at all — indistinguishable from a screen
@@ -475,8 +475,9 @@ class AgentLoop:
             # A grounder the endpoint does not serve would fail every icon pass
             # (and each failure costs a round trip); without it the loop still
             # has OCR and the local icon model, so it is dropped, not forced.
+            wanted = settings.grounder_model()
             served = settings.list_models(self.client)
-            resolved = settings.resolve_model(self.client, GROUNDER_MODEL, served) if GROUNDER_MODEL else ""
+            resolved = settings.resolve_model(self.client, wanted, served) if wanted else ""
             grounder = IconGrounder(self.client, resolved) if resolved and (served is None or resolved in served) else None
         self.grounder = grounder
         self._pool = ThreadPoolExecutor(max_workers=1)
