@@ -420,6 +420,10 @@ class LatchDriver:
         if not out["latch"]:
             return out
         try:
+            # Re-probe the disk, never the cached flag: an owner who deleted
+            # ~/.phoneflow (or a fresh Mac behind the same Latch) must show up.
+            self._ocr_ready = False
+            self._observe_ready = False
             self._ensure_ocr()
             out["helpers"] = True
         except Exception as exc:  # noqa: BLE001

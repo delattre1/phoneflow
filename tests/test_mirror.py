@@ -339,3 +339,30 @@ def test_actions_wait_for_the_owner_and_hand_the_focus_back():
     sent = drv.scripts[-1]
     assert sent.index("pf_idle") < sent.index("frontmost") < sent.index("pf_drag")
     assert sent.rindex("pfPrev to true") > sent.index("pf_drag")
+
+
+def test_doctor_reprobes_helpers_instead_of_trusting_the_cache():
+    probes = []
+
+    def handler(method, params, msg):
+        name = params.get("name")
+        if name == "plow_run_applescript":
+            script = params["arguments"]["script"]
+            if "test -x" in script:
+                probes.append(script)
+                return _envelope({"exit_code": 0, "output": "yes"})
+            if "echo $HOME" in script:
+                return _envelope({"exit_code": 0, "output": "/Users/owner"})
+            if "perms" in script:
+                return _envelope({"exit_code": 0, "output": '{"accessibility":true,"screenRecording":true}'})
+            return _envelope({"exit_code": 0, "output": "iPhone Mirroring, 100, 100, 300, 600"})
+        if name == "plow_write_file":
+            return _envelope({"status": "completed"})
+        raise AssertionError(name)
+
+    drv = LatchDriver(transport=FakeTransport(handler), agent_token="tok")
+    drv.health()
+    drv._ensure_ocr()
+    n = len(probes)
+    assert drv.doctor()["helpers"] is True
+    assert len(probes) > n
