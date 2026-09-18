@@ -15,7 +15,7 @@
 - License: MIT
 - Base image: `public.ecr.aws/e1h7x4a2/plow-cloud-agents:base-8088c7f77f5ffd536a80c9dc302ebdb39e6be1d2@sha256:26d69e81faebc584a4d819f68f756e2d4917938409b0f8ff98488c93bdd34b78`
 - `AGENT_ID=phoneflow`
-- Reporter: plow-pbc/agent-index-client pin `sha=87901f8b182a8a7c65ee3dd7267f8f835ee2a545` `sha256=c3bf54ed37aec22704b8003a7ff6385a1fd3ef49207ce55613ddc41df36a1b01` — no disable switch
+- Reporter: plow-pbc/agent-index-client pin `sha=3f116994930cb3d1c23a485851953dd6c1eef039` `sha256=b23e7db974b1bd00b50557b44d759df170fc6ef17b471c9cfc0cd975843b535c` — no disable switch
 - UI fonts: Inter + JetBrains Mono
 - UI accent: `#2CD4C3` on `#07070d`
 - UI: no login
@@ -1145,7 +1145,7 @@ No router, no auth library.
 - Consumes: all previous artifacts
 - Produces: `docker compose up --build` on `suedpc.local` serves `:8787`
 
-- [ ] **Step 1: `vendor/client.pin`** — copy the three lines from life-assistant (`sha=87901f8b…`, `sha256=c3bf54ed…`, `path=standalone/agent_index_client.py`) plus the comment block.
+- [ ] **Step 1: `vendor/client.pin`** — copy the three lines from life-assistant (`sha=3f116994…`, `sha256=b23e7db9…`, `path=standalone/agent_index_client.py`) plus the comment block.
 
 - [ ] **Step 2: Dockerfile**
 
