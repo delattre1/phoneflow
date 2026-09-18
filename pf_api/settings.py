@@ -132,7 +132,20 @@ def list_models(client) -> list[str] | None:
         return None
 
 
-def model_report(client=None) -> dict:
+def probe_model(client, model: str) -> dict:
+    """Ask the endpoint for one token from `model`: the only test that works on
+    a gateway that does not list its models. {"ok": bool, "error": str}."""
+    try:
+        client.chat.completions.create(
+            model=model, max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        return {"ok": True, "error": ""}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+def model_report(client=None, probe: bool = False) -> dict:
     """Which model each role will actually run on, against the live endpoint.
 
     {"provider", "baseUrl", "planner": {"wanted", "resolved", "found"},
@@ -153,7 +166,15 @@ def model_report(client=None) -> dict:
             return {"wanted": "", "resolved": "", "found": None}
         resolved = resolve_model(client, wanted, available)
         found = None if available is None else (resolved in available)
-        return {"wanted": wanted, "resolved": resolved, "found": found}
+        out = {"wanted": wanted, "resolved": resolved, "found": found}
+        if probe and found is not False:
+            # A gateway that does not list its models can still be asked; a
+            # listed one is asked too, since being listed is not being served.
+            p = probe_model(client, resolved)
+            out["found"] = p["ok"]
+            if not p["ok"]:
+                out["error"] = p["error"]
+        return out
 
     return {"provider": llm_provider(), "baseUrl": llm_base_url(), "available": available,
             "planner": role(agent_model()), "grounder": role(grounder_model())}

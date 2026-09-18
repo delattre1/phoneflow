@@ -57,7 +57,7 @@ def run(driver) -> dict:
     raw["llmModel"] = None
     if raw["llmKey"]:
         try:
-            report = settings.model_report()
+            report = settings.model_report(probe=True)
         except Exception as exc:  # noqa: BLE001
             report = None
             detail["llmModel"] = f"could not reach the model endpoint: {str(exc)[:200]}"
@@ -69,7 +69,7 @@ def run(driver) -> dict:
             served = report["available"]
             detail["llmModel"] = (
                 f"planner {planner['wanted']} -> {planner['resolved']}"
-                f"{'' if planner['found'] is not False else ' (NOT served)'}; "
+                f"{'' if planner['found'] is not False else ' (NOT served: ' + planner.get('error', '')[:120] + ')'}; "
                 f"grounder {grounder['wanted'] or 'off'} -> "
                 f"{grounder['resolved'] if grounder['found'] is not False else 'not served, icons by OCR/local model only'}"
                 + (f"; endpoint lists {len(served)} models" if served is not None else "; endpoint does not list models")

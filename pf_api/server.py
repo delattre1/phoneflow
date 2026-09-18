@@ -155,8 +155,9 @@ class PhoneFlowHandler(BaseHTTPRequestHandler):
             self._send(200, settings.public_config(self._home()))
             return
         if path == "/api/models":
+            probe = "probe=1" in (urlparse(self.path).query or "")
             try:
-                self._send(200, settings.model_report())
+                self._send(200, settings.model_report(probe=probe))
             except Exception as exc:  # noqa: BLE001
                 self._send(502, {"code": "llm_unreachable", "message": str(exc)[:300]})
             return
