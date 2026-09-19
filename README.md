@@ -118,9 +118,8 @@ docker compose up --build -d
 > cp -p plow-credentials ~/.config/plow/backups/phoneflow-plow-credentials.$(date +%Y%m%d)
 > ```
 
-The first build needs network access. The Dockerfile fetches the pinned Agent
-Index client named in [`vendor/client.pin`](vendor/client.pin), checks its
-SHA-256, and fails the build on a mismatch.
+The first build needs network access. The Agent Index reporter comes with the
+Plow base image; this repo ships no copy of it.
 
 ### Step 4. Verify
 
@@ -162,7 +161,7 @@ PYEOF
 
 ### Step 6. Register in the Agent Index
 
-The container self-registers on first boot: the baked-in `agent-index` service
+The container self-registers on first boot: the base image's `agent-index` service
 registers with `PLOW_AGENT_TOKEN` when it finds itself unregistered, then
 reports usage every 5 minutes. To register by hand:
 
